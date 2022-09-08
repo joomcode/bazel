@@ -125,6 +125,7 @@ import io.reactivex.rxjava3.core.Single;
 import io.reactivex.rxjava3.core.SingleObserver;
 import io.reactivex.rxjava3.disposables.Disposable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -338,7 +339,8 @@ public class RemoteExecutionService {
   public boolean mayBeExecutedRemotely(Spawn spawn) {
     return remoteCache instanceof RemoteExecutionCache
         && remoteExecutor != null
-        && Spawns.mayBeExecutedRemotely(spawn);
+        && Spawns.mayBeExecutedRemotely(spawn)
+        && !(remoteOptions.remoteCacheKeyIgnoreStamping && hasVolatileArtifacts(spawn));
   }
 
   @VisibleForTesting
@@ -401,7 +403,7 @@ public class RemoteExecutionService {
         inputMap = newInputMap;
       }
       return MerkleTree.build(
-          inputMap,
+          filterInputs(inputMap),
           toolSignature == null ? ImmutableSet.of() : toolSignature.toolInputs,
           context.getMetadataProvider(),
           execRoot,
@@ -455,7 +457,7 @@ public class RemoteExecutionService {
     ConcurrentLinkedQueue<MerkleTree> subMerkleTrees = new ConcurrentLinkedQueue<>();
     subMerkleTrees.add(
         MerkleTree.build(
-            walker.getLeavesInputMapping(),
+            filterInputs(walker.getLeavesInputMapping()),
             metadataProvider,
             execRoot,
             artifactPathResolver,
@@ -467,6 +469,20 @@ public class RemoteExecutionService {
                   subNodeKey, subWalker, metadataProvider, artifactPathResolver));
         });
     return MerkleTree.merge(subMerkleTrees, digestUtil);
+  }
+
+  private SortedMap<PathFragment, ActionInput> filterInputs(SortedMap<PathFragment, ActionInput> inputs) {
+    if (!remoteOptions.remoteCacheKeyIgnoreStamping) {
+      return inputs;
+    }
+    SortedMap<PathFragment, ActionInput> result = new TreeMap<>();
+    for (Entry<PathFragment, ActionInput> entry : inputs.entrySet()) {
+      ActionInput input = entry.getValue();
+      if (!isConstantMetadata(input)) {
+        result.put(entry.getKey(), input);
+      }
+    }
+    return result;
   }
 
   @Nullable
@@ -1575,6 +1591,23 @@ public class RemoteExecutionService {
       reportedErrors.add(evt.getMessage());
       reporter.handle(evt);
     }
+  }
+
+  private static boolean hasVolatileArtifacts(Spawn spawn) {
+    var inputFiles = spawn.getInputFiles();
+    for (ActionInput inputFile : inputFiles.getLeaves()) {
+      if (isConstantMetadata(inputFile)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean isConstantMetadata(ActionInput input) {
+    if (input instanceof Artifact) {
+      return ((Artifact) input).isConstantMetadata();
+    }
+    return false;
   }
 
   /**
