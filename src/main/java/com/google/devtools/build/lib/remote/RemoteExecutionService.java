@@ -341,7 +341,8 @@ public class RemoteExecutionService {
   public boolean mayBeExecutedRemotely(Spawn spawn) {
     return remoteCache instanceof RemoteExecutionCache
         && remoteExecutor != null
-        && Spawns.mayBeExecutedRemotely(spawn);
+        && Spawns.mayBeExecutedRemotely(spawn)
+        && !hasVolatileArtifacts(spawn, scrubber);
   }
 
   @VisibleForTesting
@@ -1593,6 +1594,20 @@ public class RemoteExecutionService {
       reportedErrors.add(evt.getMessage());
       reporter.handle(evt);
     }
+  }
+
+  private static boolean hasVolatileArtifacts(Spawn spawn, @Nullable Scrubber scrubber) {
+    if (scrubber == null) {
+      return false;
+    }
+    SpawnScrubber spawnScrubber = scrubber.forSpawn(spawn);
+    var inputFiles = spawn.getInputFiles();
+    for (ActionInput inputFile : inputFiles.getLeaves()) {
+      if (spawnScrubber.shouldOmitInput(inputFile)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
