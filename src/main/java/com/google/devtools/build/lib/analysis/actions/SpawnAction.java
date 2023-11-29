@@ -516,7 +516,14 @@ public class SpawnAction extends AbstractAction implements CommandAction {
           parent.getRunfilesSupplier(),
           parent,
           parent.resourceSetOrBuilder);
-      this.inputs = getNonFilesetInputs(inputs).addAll(additionalInputs).build();
+      NestedSetBuilder<ActionInput> inputsBuilder = NestedSetBuilder.stableOrder();
+      for (Artifact input : inputs.toList()) {
+        if (!input.isFileset()) {
+          inputsBuilder.add(input);
+        }
+      }
+      inputsBuilder.addAll(additionalInputs);
+      this.inputs = inputsBuilder.build();
       this.filesetMappings = filesetMappings;
       this.pathMapper = pathMapper;
 
