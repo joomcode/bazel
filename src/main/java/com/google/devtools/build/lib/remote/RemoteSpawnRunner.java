@@ -182,7 +182,7 @@ public class RemoteSpawnRunner implements SpawnRunner {
   public SpawnResult exec(Spawn spawn, SpawnExecutionContext context)
       throws ExecException, InterruptedException, IOException, ForbiddenActionInputException {
     Preconditions.checkArgument(
-        remoteExecutionService.mayBeExecutedRemotely(spawn),
+        remoteExecutionService.mayBeExecutedRemotely(spawn, cmdlineReporter),
         "Spawn can't be executed remotely. This is a bug.");
 
     Stopwatch totalTime = Stopwatch.createStarted();
@@ -460,7 +460,7 @@ public class RemoteSpawnRunner implements SpawnRunner {
 
   @Override
   public boolean canExec(Spawn spawn) {
-    return remoteExecutionService.mayBeExecutedRemotely(spawn);
+    return remoteExecutionService.mayBeExecutedRemotely(spawn, cmdlineReporter);
   }
 
   @Override
