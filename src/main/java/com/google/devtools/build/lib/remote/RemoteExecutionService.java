@@ -346,7 +346,7 @@ public class RemoteExecutionService {
     return remoteCache instanceof RemoteExecutionCache
         && remoteExecutor != null
         && Spawns.mayBeExecutedRemotely(spawn)
-        && !isScrubbedSpawn(spawn, scrubber);
+        && !hasScrubbedInput(spawn, scrubber);
   }
 
   @VisibleForTesting
@@ -1635,8 +1635,29 @@ public class RemoteExecutionService {
     }
   }
 
-  private static boolean isScrubbedSpawn(Spawn spawn, @Nullable Scrubber scrubber) {
-    return scrubber != null && scrubber.forSpawn(spawn) != null;
+  private static boolean hasScrubbedInput(Spawn spawn, @Nullable Scrubber scrubber) {
+    if (scrubber == null) {
+      return false;
+    }
+    SpawnScrubber spawnScrubber = scrubber.forSpawn(spawn);
+    if (spawnScrubber == null) {
+      return false;
+    }
+    if (!spawnScrubber.getSalt().isEmpty()) {
+      return true;
+    }
+    for (String arg : spawn.getArguments()) {
+      if (!arg.equals(spawnScrubber.transformArgument(arg))) {
+        return true;
+      }
+    }
+    var inputFiles = spawn.getInputFiles();
+    for (ActionInput inputFile : inputFiles.toList()) {
+      if (spawnScrubber.shouldOmitInput(inputFile.getExecPath())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
