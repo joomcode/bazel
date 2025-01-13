@@ -61,10 +61,12 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.eventbus.Subscribe;
+import com.google.common.flogger.GoogleLogger;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.devtools.build.lib.actions.ActionInput;
+import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactPathResolver;
 import com.google.devtools.build.lib.actions.EnvironmentalExecException;
@@ -1983,7 +1985,7 @@ public class RemoteExecutionService {
     }
   }
 
-  private static boolean hasScrubbedInput(Spawn spawn, @Nullable Scrubber scrubber) {
+  private boolean hasScrubbedInput(Spawn spawn, @Nullable Scrubber scrubber) {
     if (scrubber == null) {
       return false;
     }
@@ -2000,10 +2002,22 @@ public class RemoteExecutionService {
       }
     }
     var inputFiles = spawn.getInputFiles();
+
+    String mnemonic = spawn.getMnemonic();
+    ActionOwner actionOwner = spawn.getResourceOwner().getOwner();
+    String label = actionOwner.getLabel().getCanonicalForm();
+    String kind = actionOwner.getTargetKind();
+
     for (ActionInput inputFile : inputFiles.toList()) {
       if (spawnScrubber.shouldOmitInput(inputFile.getExecPath())) {
+        if (!spawnScrubber.hasMatcher) {
+          reporter.handle(Event.warn(String.format("Used file-based scrubber for mnemonic: %s, label: %s, kind: %s", mnemonic, label, kind)));
+        }
         return true;
       }
+    }
+    if (spawnScrubber.hasMatcher) {
+      reporter.handle(Event.warn(String.format("Unused scrubber for mnemonic: %s, label: %s, kind: %s", mnemonic, label, kind)));
     }
     return false;
   }

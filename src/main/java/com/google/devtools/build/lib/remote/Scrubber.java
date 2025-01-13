@@ -110,6 +110,7 @@ public class Scrubber {
     private final ImmutableList<Pattern> omittedInputPatterns;
     private final ImmutableMap<Pattern, String> argReplacements;
     private final String salt;
+    public final boolean hasMatcher;
 
     private SpawnScrubber(Config.Rule ruleProto) {
       Config.Matcher matcherProto = ruleProto.getMatcher();
@@ -127,6 +128,7 @@ public class Scrubber {
           transformProto.getArgReplacementsList().stream()
               .collect(toImmutableMap(r -> Pattern.compile(r.getSource()), r -> r.getTarget()));
       this.salt = ruleProto.getTransform().getSalt();
+      this.hasMatcher = ruleProto.hasMatcher();
     }
 
     private String emptyToAll(String s) {
