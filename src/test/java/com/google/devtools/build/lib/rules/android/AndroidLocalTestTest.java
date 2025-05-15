@@ -154,28 +154,11 @@ public abstract class AndroidLocalTestTest extends AbstractAndroidLocalTestTestB
         "android_local_test(name = 'dummyTest',",
         "    srcs = ['test.java'],",
         "    deps = extra_deps)");
-    useConfiguration("--experimental_android_local_test_binary_resources");
     ConfiguredTarget target = getConfiguredTarget("//java/test:dummyTest");
     NestedSet<Artifact> runfilesArtifacts = collectRunfiles(target);
     Artifact resourceApk =
         ActionsTestUtil.getFirstArtifactEndingWith(runfilesArtifacts, "dummyTest.ap_");
     assertThat(resourceApk).isNotNull();
-  }
-
-  @Test
-  public void testNoBinaryResources() throws Exception {
-    useConfiguration("--noexperimental_android_local_test_binary_resources");
-    scratch.file(
-        "java/test/BUILD",
-        "load('//java/bar:foo.bzl', 'extra_deps')",
-        "android_local_test(name = 'dummyTest',",
-        "    srcs = ['test.java'],",
-        "    deps = extra_deps)");
-    ConfiguredTarget target = getConfiguredTarget("//java/test:dummyTest");
-    NestedSet<Artifact> runfilesArtifacts = collectRunfiles(target);
-    Artifact resourceApk =
-        ActionsTestUtil.getFirstArtifactEndingWith(runfilesArtifacts, "dummyTest.ap_");
-    assertThat(resourceApk).isNull();
   }
 
   /**
@@ -292,7 +275,7 @@ public abstract class AndroidLocalTestTest extends AbstractAndroidLocalTestTestB
 
     ConfiguredTarget ct = getConfiguredTarget("//java/com/google/android/foo:local_test");
     assertThat(ct.getProvider(RequiredConfigFragmentsProvider.class).getStarlarkOptions())
-        .containsExactly(Label.parseAbsoluteUnchecked("//java/com/google/android/foo:flag1"));
+        .containsExactly(Label.parseCanonicalUnchecked("//java/com/google/android/foo:flag1"));
   }
 
   @Override

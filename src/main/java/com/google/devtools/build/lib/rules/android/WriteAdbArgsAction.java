@@ -36,7 +36,7 @@ import java.util.List;
 import javax.annotation.Nullable;
 
 /**
- * An action that writes the a parameter file to {@code incremental_install.py} based on the command
+ * An action that writes a parameter file to {@code incremental_install.py} based on the command
  * line arguments to {@code bazel mobile-install}.
  */
 @Immutable // note that it accesses data non-hermetically during the execution phase
@@ -118,7 +118,7 @@ public final class WriteAdbArgsAction extends AbstractFileWriteAction {
   }
 
   public WriteAdbArgsAction(ActionOwner owner, Artifact outputFile) {
-    super(owner, NestedSetBuilder.emptySet(Order.STABLE_ORDER), outputFile, false);
+    super(owner, NestedSetBuilder.emptySet(Order.STABLE_ORDER), outputFile);
   }
 
   @Override

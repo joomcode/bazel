@@ -303,8 +303,7 @@ public class TypeTest {
   @Test
   public void testListDepsetConversion() throws Exception {
     Object input =
-        Depset.of(
-            Depset.ElementType.STRING, NestedSetBuilder.create(Order.STABLE_ORDER, "a", "b", "c"));
+        Depset.of(String.class, NestedSetBuilder.create(Order.STABLE_ORDER, "a", "b", "c"));
     Type.STRING_LIST.convert(input, null);
   }
 
@@ -370,6 +369,35 @@ public class TypeTest {
     assertThat(converted).isEqualTo(expected);
     assertThat(converted).isNotSameInstanceAs(expected);
     assertThat(collectLabels(Type.STRING_LIST_DICT, converted)).isEmpty();
+  }
+
+  @Test
+  public void testStringListDict_concat() throws Exception {
+    assertThat(Type.STRING_LIST_DICT.concat(ImmutableList.of())).isEmpty();
+
+    ImmutableMap<String, List<String>> expected =
+        ImmutableMap.of(
+            "foo", Arrays.asList("foo", "bar"),
+            "wiz", Arrays.asList("bang"));
+    assertThat(Type.STRING_LIST_DICT.concat(ImmutableList.of(expected))).isEqualTo(expected);
+
+    ImmutableMap<String, List<String>> map1 =
+        ImmutableMap.of(
+            "foo", Arrays.asList("a", "b"),
+            "bar", Arrays.asList("c", "d"));
+    ImmutableMap<String, List<String>> map2 =
+        ImmutableMap.of(
+            "bar", Arrays.asList("x", "y"),
+            "baz", Arrays.asList("z"));
+
+    ImmutableMap<String, List<String>> expectedAfterConcat =
+        ImmutableMap.of(
+            "foo", Arrays.asList("a", "b"),
+            "bar", Arrays.asList("x", "y"),
+            "baz", Arrays.asList("z"));
+
+    assertThat(Type.STRING_LIST_DICT.concat(ImmutableList.of(map1, map2)))
+        .isEqualTo(expectedAfterConcat);
   }
 
   @Test

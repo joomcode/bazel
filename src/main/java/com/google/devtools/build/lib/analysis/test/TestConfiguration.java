@@ -25,9 +25,12 @@ import com.google.devtools.build.lib.analysis.config.Fragment;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.config.PerLabelOptions;
 import com.google.devtools.build.lib.analysis.config.RequiresOptions;
+import com.google.devtools.build.lib.analysis.test.CoverageConfiguration.CoverageOptions;
 import com.google.devtools.build.lib.analysis.test.TestShardingStrategy.ShardingStrategyConverter;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.packages.TestSize;
 import com.google.devtools.build.lib.packages.TestTimeout;
+import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.util.RegexFilter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDefinition;
@@ -51,7 +54,9 @@ public class TestConfiguration extends Fragment {
           // changes in --trim_test_configuration itself or related flags always prompt invalidation
           return true;
         }
-        if (!changedOption.getField().getDeclaringClass().equals(TestOptions.class)) {
+        Class<?> affectedOptionsClass = changedOption.getField().getDeclaringClass();
+        if (!affectedOptionsClass.equals(TestOptions.class)
+            && !affectedOptionsClass.equals(CoverageOptions.class)) {
           // options outside of TestOptions always prompt invalidation
           return true;
         }
@@ -80,6 +85,26 @@ public class TestConfiguration extends Fragment {
                 + "short, moderate, long and eternal (in that order). In either form, a value of "
                 + "-1 tells blaze to use its default timeouts for that category.")
     public Map<TestTimeout, Duration> testTimeout;
+
+    @Option(
+        name = "default_test_resources",
+        defaultValue = "null",
+        converter = TestResourcesConverter.class,
+        allowMultiple = true,
+        documentationCategory = OptionDocumentationCategory.TESTING,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help =
+            "Override the default resources amount for tests. The expected format is"
+                + " <resource>=<value>. If a single positive number is specified as <value>"
+                + " it will override the default resources for all test sizes. If 4"
+                + " comma-separated numbers are specified, they will override the resource"
+                + " amount for respectively the small, medium, large, enormous test sizes."
+                + " Values can also be HOST_RAM/HOST_CPU, optionally followed"
+                + " by [-|*]<float> (eg. memory=HOST_RAM*.1,HOST_RAM*.2,HOST_RAM*.3,HOST_RAM*.4)."
+                + " The default test resources specified by this flag are overridden by explicit"
+                + " resources specified in tags.")
+    // We need to store these as Pair(s) instead of Map.Entry(s) so that they are serializable.
+    public List<Pair<String, Map<TestSize, Double>>> testResources;
 
     @Option(
       name = "test_filter",
@@ -181,7 +206,8 @@ public class TestConfiguration extends Fragment {
         help =
             "Specify strategy for test sharding: "
                 + "'explicit' to only use sharding if the 'shard_count' BUILD attribute is "
-                + "present. 'disabled' to never use test sharding.")
+                + "present. 'disabled' to never use test sharding. 'forced=k' to enforce 'k' "
+                + "shards for testing regardless of the 'shard_count' BUILD attribute.")
     public TestShardingStrategy testShardingStrategy;
 
     @Option(
@@ -241,23 +267,6 @@ public class TestConfiguration extends Fragment {
     public Label coverageSupport;
 
     @Option(
-        name = "coverage_report_generator",
-        converter = LabelConverter.class,
-        defaultValue = "@bazel_tools//tools/test:coverage_report_generator",
-        documentationCategory = OptionDocumentationCategory.TOOLCHAIN,
-        effectTags = {
-            OptionEffectTag.CHANGES_INPUTS,
-            OptionEffectTag.AFFECTS_OUTPUTS,
-            OptionEffectTag.LOADING_AND_ANALYSIS
-        },
-        help =
-            "Location of the binary that is used to generate coverage reports. This must "
-                + "currently be a filegroup that contains a single file, the binary. Defaults to "
-                + "'//tools/test:coverage_report_generator'."
-    )
-    public Label coverageReportGenerator;
-
-    @Option(
         name = "experimental_fetch_all_coverage_outputs",
         defaultValue = "false",
         documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
@@ -269,7 +278,7 @@ public class TestConfiguration extends Fragment {
 
     @Option(
         name = "incompatible_exclusive_test_sandboxed",
-        defaultValue = "false",
+        defaultValue = "true",
         documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
         effectTags = {OptionEffectTag.UNKNOWN},
         metadataTags = {OptionMetadataTag.INCOMPATIBLE_CHANGE},
@@ -294,11 +303,34 @@ public class TestConfiguration extends Fragment {
         help = "If true, undeclared test outputs will be archived in a zip file.")
     public boolean zipUndeclaredTestOutputs;
 
+    @Option(
+        name = "use_target_platform_for_tests",
+        defaultValue = "false",
+        documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+        effectTags = {OptionEffectTag.EXECUTION},
+        help =
+            "If true, then Bazel will use the target platform for running tests rather than "
+                + "the test exec group.")
+    public boolean useTargetPlatformForTests;
+
+    @Option(
+        name = "incompatible_check_sharding_support",
+        defaultValue = "true",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        metadataTags = {OptionMetadataTag.INCOMPATIBLE_CHANGE},
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help =
+            "If true, Bazel will fail a sharded test if the test runner does not indicate that it "
+                + "supports sharding by touching the file at the path in TEST_SHARD_STATUS_FILE. "
+                + "If false, a test runner that does not support sharding will lead to all tests "
+                + "running in each shard.")
+    public boolean checkShardingSupport;
+
     @Override
-    public FragmentOptions getHost() {
+    public FragmentOptions getExec() {
       // Options here are either:
       // 1. Applicable only for the test actions, which are relevant only for the top-level targets
-      //    before host or exec transitions can apply.
+      //    before exec transitions can apply.
       // 2. Supposed to be build-universal and thus non-transitionable anyways
       //    (e.g. trim_test_configuration)
       // And thus the options should just be copied and not reset by the exec transition (as
@@ -310,6 +342,7 @@ public class TestConfiguration extends Fragment {
   private final TestOptions options;
   private final ImmutableMap<TestTimeout, Duration> testTimeout;
   private final boolean shouldInclude;
+  private final ImmutableMap<TestSize, ImmutableMap<String, Double>> testResources;
 
   public TestConfiguration(BuildOptions buildOptions) {
     this.shouldInclude = buildOptions.contains(TestOptions.class);
@@ -317,9 +350,20 @@ public class TestConfiguration extends Fragment {
       TestOptions options = buildOptions.get(TestOptions.class);
       this.options = options;
       this.testTimeout = ImmutableMap.copyOf(options.testTimeout);
+      ImmutableMap.Builder<TestSize, ImmutableMap<String, Double>> testResources =
+          ImmutableMap.builderWithExpectedSize(TestSize.values().length);
+      for (TestSize size : TestSize.values()) {
+        ImmutableMap.Builder<String, Double> resources = ImmutableMap.builder();
+        for (Pair<String, Map<TestSize, Double>> resource : options.testResources) {
+          resources.put(resource.getFirst(), resource.getSecond().get(size));
+        }
+        testResources.put(size, resources.buildKeepingLast());
+      }
+      this.testResources = testResources.buildOrThrow();
     } else {
       this.options = null;
       this.testTimeout = null;
+      this.testResources = ImmutableMap.of();
     }
   }
 
@@ -331,6 +375,11 @@ public class TestConfiguration extends Fragment {
   /** Returns test timeout mapping as set by --test_timeout options. */
   public ImmutableMap<TestTimeout, Duration> getTestTimeout() {
     return testTimeout;
+  }
+
+  /** Returns test resource mapping as set by --default_test_resources options. */
+  public ImmutableMap<String, Double> getTestResources(TestSize size) {
+    return testResources.getOrDefault(size, ImmutableMap.of());
   }
 
   public String getTestFilter() {
@@ -355,10 +404,6 @@ public class TestConfiguration extends Fragment {
 
   public Label getCoverageSupport() {
     return options.coverageSupport;
-  }
-
-  public Label getCoverageReportGenerator() {
-    return options.coverageReportGenerator;
   }
 
   /**
@@ -396,6 +441,14 @@ public class TestConfiguration extends Fragment {
 
   public boolean getZipUndeclaredTestOutputs() {
     return options.zipUndeclaredTestOutputs;
+  }
+
+  public boolean useTargetPlatformForTests() {
+    return options.useTargetPlatformForTests;
+  }
+
+  public boolean checkShardingSupport() {
+    return options.checkShardingSupport;
   }
 
   /**

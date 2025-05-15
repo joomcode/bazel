@@ -265,16 +265,27 @@ int ReadFromHandle(file_handle_type fd, void *data, size_t size, int *error) {
   return result;
 }
 
-bool ReadFile(const string &filename, string *content, int max_size) {
+bool ReadFile(const string &filename, string *content, string *error_message,
+              int max_size) {
   int fd = open(filename.c_str(), O_RDONLY);
-  if (fd == -1) return false;
+  if (fd == -1) {
+    if (error_message != nullptr) {
+      *error_message = blaze_util::GetLastErrorString();
+    }
+    return false;
+  }
   bool result = ReadFrom(fd, content, max_size);
   close(fd);
   return result;
 }
 
+bool ReadFile(const string &filename, string *content, int max_size) {
+  return ReadFile(filename, content, /* error_message= */nullptr, max_size);
+}
+
 bool ReadFile(const Path &path, std::string *content, int max_size) {
-  return ReadFile(path.AsNativePath(), content, max_size);
+  return ReadFile(
+    path.AsNativePath(), content, /* error_message= */nullptr, max_size);
 }
 
 bool ReadFile(const string &filename, void *data, size_t size) {
@@ -315,6 +326,8 @@ bool WriteFile(const void *data, size_t size, const Path &path,
                unsigned int perm) {
   return WriteFile(data, size, path.AsNativePath(), perm);
 }
+
+void InitializeStdOutErrForUtf8() {}
 
 int WriteToStdOutErr(const void *data, size_t size, bool to_stdout) {
   size_t r = fwrite(data, 1, size, to_stdout ? stdout : stderr);
@@ -442,6 +455,7 @@ class PosixFileMtime : public IFileMtime {
 
   bool IsUntampered(const Path &path) override;
   bool SetToNow(const Path &path) override;
+  bool SetToNowIfPossible(const Path &path) override;
   bool SetToDistantFuture(const Path &path) override;
 
  private:
@@ -473,6 +487,19 @@ bool PosixFileMtime::SetToNow(const Path &path) {
   time_t now(GetNow());
   struct utimbuf times = {now, now};
   return Set(path, times);
+}
+
+bool PosixFileMtime::SetToNowIfPossible(const Path &path) {
+  bool okay = this->SetToNow(path);
+  if (!okay) {
+    // `SetToNow`/`Set` are backed by `utime(2)` which can return `EROFS` and
+    // `EPERM` when there's a permissions issue:
+    if (errno == EROFS || errno == EPERM) {
+      okay = true;
+    }
+  }
+
+  return okay;
 }
 
 bool PosixFileMtime::SetToDistantFuture(const Path &path) {

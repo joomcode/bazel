@@ -22,6 +22,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.analysis.AnalysisOptions;
+import com.google.devtools.build.lib.analysis.AspectCollection;
 import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
 import com.google.devtools.build.lib.analysis.ViewCreationFailedException;
@@ -41,11 +42,13 @@ import com.google.devtools.build.lib.util.io.OutErr;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParsingResult;
 import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.ParsedOptionDescription;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Predicate;
 import javax.annotation.Nullable;
 
 /**
@@ -55,7 +58,6 @@ import javax.annotation.Nullable;
  * as --keep_going, --jobs, etc.
  */
 public class BuildRequest implements OptionsProvider {
-  public static final String VALIDATION_ASPECT_NAME = "ValidateTarget";
 
   private static final ImmutableList<Class<? extends OptionsBase>> MANDATORY_OPTIONS =
       ImmutableList.of(
@@ -269,6 +271,12 @@ public class BuildRequest implements OptionsProvider {
     return starlarkOptions;
   }
 
+  @Override
+  public Map<String, Object> getExplicitStarlarkOptions(
+      Predicate<? super ParsedOptionDescription> filter) {
+    throw new UnsupportedOperationException("No known callers to this implementation");
+  }
+
   /**
    * Returns a unique identifier that universally identifies this build.
    */
@@ -404,18 +412,6 @@ public class BuildRequest implements OptionsProvider {
       warnings.add("--verbose_explanations has no effect when --explain=<file> is not enabled");
     }
 
-    // --nobuild means no execution will be carried out, hence it doesn't make sense to
-    // interleave analysis and execution in that case.
-    // Aquery and Cquery implicitly set --nobuild, so there's no need to have a warning here: it
-    // makes no different from the users' perspective.
-    if (getBuildOptions().mergedSkyframeAnalysisExecution
-        && !getBuildOptions().performExecutionPhase
-        && !("aquery".equals(commandName) || "cquery".equals(commandName))) {
-      warnings.add(
-          "--experimental_merged_skyframe_analysis_execution is incompatible with --nobuild and"
-              + " will be ignored.");
-    }
-
     return warnings;
   }
 
@@ -433,8 +429,8 @@ public class BuildRequest implements OptionsProvider {
   public ImmutableList<String> getAspects() {
     List<String> aspects = getBuildOptions().aspects;
     ImmutableList.Builder<String> result = ImmutableList.<String>builder().addAll(aspects);
-    if (!aspects.contains(VALIDATION_ASPECT_NAME) && useValidationAspect()) {
-      result.add(VALIDATION_ASPECT_NAME);
+    if (!aspects.contains(AspectCollection.VALIDATION_ASPECT_NAME) && useValidationAspect()) {
+      result.add(AspectCollection.VALIDATION_ASPECT_NAME);
     }
     return result.build();
   }
@@ -457,18 +453,14 @@ public class BuildRequest implements OptionsProvider {
     }
   }
 
-  /** Whether {@value #VALIDATION_ASPECT_NAME} is in use. */
+  /** Whether {@value AspectCollection#VALIDATION_ASPECT_NAME} is in use. */
   public boolean useValidationAspect() {
     return validationMode() == OutputGroupInfo.ValidationMode.ASPECT;
   }
 
   private OutputGroupInfo.ValidationMode validationMode() {
     BuildRequestOptions buildOptions = getBuildOptions();
-    // "and" these together so that --noexperimental_run_validation and --norun_validations work
-    // as expected.
-    boolean runValidationActions =
-        buildOptions.runValidationActions && buildOptions.experimentalRunValidationActions;
-    if (!runValidationActions) {
+    if (!buildOptions.runValidationActions) {
       return OutputGroupInfo.ValidationMode.OFF;
     }
     return buildOptions.useValidationAspect

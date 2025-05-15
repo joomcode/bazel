@@ -14,17 +14,20 @@
 package com.google.devtools.build.lib.buildtool;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.CommandLineExpansionException;
+import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.analysis.actions.TemplateExpansionException;
 import com.google.devtools.build.lib.analysis.config.BuildConfigurationValue;
+import com.google.devtools.build.lib.cmdline.TargetPattern;
 import com.google.devtools.build.lib.events.Event;
+import com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions;
 import com.google.devtools.build.lib.query2.PostAnalysisQueryEnvironment;
 import com.google.devtools.build.lib.query2.PostAnalysisQueryEnvironment.TopLevelConfigurations;
 import com.google.devtools.build.lib.query2.aquery.ActionGraphProtoOutputFormatterCallback;
 import com.google.devtools.build.lib.query2.aquery.ActionGraphQueryEnvironment;
 import com.google.devtools.build.lib.query2.aquery.AqueryActionFilter;
 import com.google.devtools.build.lib.query2.aquery.AqueryOptions;
-import com.google.devtools.build.lib.query2.aquery.KeyedConfiguredTargetValue;
 import com.google.devtools.build.lib.query2.engine.ActionFilterFunction;
 import com.google.devtools.build.lib.query2.engine.FunctionExpression;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.Argument;
@@ -40,34 +43,40 @@ import com.google.devtools.build.lib.server.FailureDetails.ActionQuery.Code;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.skyframe.SequencedSkyframeExecutor;
 import com.google.devtools.build.lib.skyframe.actiongraph.v2.ActionGraphDump;
+import com.google.devtools.build.lib.skyframe.actiongraph.v2.AqueryConsumingOutputHandler;
 import com.google.devtools.build.lib.skyframe.actiongraph.v2.AqueryOutputHandler;
 import com.google.devtools.build.lib.skyframe.actiongraph.v2.AqueryOutputHandler.OutputType;
 import com.google.devtools.build.lib.skyframe.actiongraph.v2.InvalidAqueryOutputFormatException;
-import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.WalkableGraph;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.util.Collection;
 import java.util.Optional;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.StarlarkSemantics;
 
 /** Performs {@code aquery} processing. */
-public final class AqueryProcessor extends PostAnalysisQueryProcessor<KeyedConfiguredTargetValue> {
+public final class AqueryProcessor extends PostAnalysisQueryProcessor<ConfiguredTargetValue> {
   private final AqueryActionFilter actionFilters;
 
-  public AqueryProcessor(@Nullable QueryExpression queryExpression)
+  public AqueryProcessor(
+      @Nullable QueryExpression queryExpression, TargetPattern.Parser mainRepoTargetParser)
       throws AqueryActionFilterException {
-    super(queryExpression);
+    super(queryExpression, mainRepoTargetParser);
     actionFilters = buildActionFilters(queryExpression);
+  }
+
+  @Override
+  protected AqueryOptions getQueryOptions(CommandEnvironment env) {
+    return env.getOptions().getOptions(AqueryOptions.class);
   }
 
   /** Outputs the current action graph from Skyframe. */
   public BlazeCommandResult dumpActionGraphFromSkyframe(CommandEnvironment env) {
+    AqueryOptions aqueryOptions = getQueryOptions(env);
     try (QueryRuntimeHelper queryRuntimeHelper =
-        env.getRuntime().getQueryRuntimeHelperFactory().create(env)) {
-      AqueryOptions aqueryOptions = env.getOptions().getOptions(AqueryOptions.class);
+        env.getRuntime().getQueryRuntimeHelperFactory().create(env, aqueryOptions)) {
 
       PrintStream printStream =
           queryRuntimeHelper.getOutputStreamForQueryOutput() == null
@@ -85,11 +94,11 @@ public final class AqueryProcessor extends PostAnalysisQueryProcessor<KeyedConfi
                 aqueryOptions.includeArtifacts,
                 actionFilters,
                 aqueryOptions.includeParamFiles,
-                aqueryOptions.deduplicateDepsets,
                 aqueryOptions.includeFileWriteContents,
                 aqueryOutputHandler,
                 env.getReporter());
-        ((SequencedSkyframeExecutor) env.getSkyframeExecutor()).dumpSkyframeState(actionGraphDump);
+        dumpActionGraph(env, aqueryOutputHandler, actionGraphDump);
+
       } catch (InvalidAqueryOutputFormatException e) {
         String message =
             "--skyframe_state must be used with --output=proto|textproto|jsonproto. "
@@ -116,13 +125,26 @@ public final class AqueryProcessor extends PostAnalysisQueryProcessor<KeyedConfi
     }
   }
 
+  public static void dumpActionGraph(
+      CommandEnvironment env,
+      AqueryOutputHandler aqueryOutputHandler,
+      ActionGraphDump actionGraphDump)
+      throws CommandLineExpansionException, TemplateExpansionException, IOException {
+    if (aqueryOutputHandler instanceof AqueryConsumingOutputHandler) {
+      ((SequencedSkyframeExecutor) env.getSkyframeExecutor())
+          .dumpSkyframeStateInParallel(
+              actionGraphDump, (AqueryConsumingOutputHandler) aqueryOutputHandler);
+    } else {
+      ((SequencedSkyframeExecutor) env.getSkyframeExecutor()).dumpSkyframeState(actionGraphDump);
+    }
+  }
+
   @Override
-  protected PostAnalysisQueryEnvironment<KeyedConfiguredTargetValue> getQueryEnvironment(
+  protected PostAnalysisQueryEnvironment<ConfiguredTargetValue> getQueryEnvironment(
       BuildRequest request,
       CommandEnvironment env,
-      BuildConfigurationValue hostConfiguration,
       TopLevelConfigurations topLevelConfigurations,
-      Collection<SkyKey> transitiveConfigurationKeys,
+      ImmutableMap<String, BuildConfigurationValue> transitiveConfigurations,
       WalkableGraph walkableGraph) {
     ImmutableList<QueryFunction> extraFunctions =
         new ImmutableList.Builder<QueryFunction>()
@@ -131,17 +153,23 @@ public final class AqueryProcessor extends PostAnalysisQueryProcessor<KeyedConfi
             .build();
     AqueryOptions aqueryOptions = request.getOptions(AqueryOptions.class);
 
+    StarlarkSemantics starlarkSemantics =
+        env.getSkyframeExecutor()
+            .getEffectiveStarlarkSemantics(env.getOptions().getOptions(BuildLanguageOptions.class));
     ActionGraphQueryEnvironment queryEnvironment =
         new ActionGraphQueryEnvironment(
             request.getKeepGoing(),
             env.getReporter(),
             extraFunctions,
             topLevelConfigurations,
-            hostConfiguration,
-            env.getRelativeWorkingDirectory(),
+            transitiveConfigurations,
+            mainRepoTargetParser,
             env.getPackageManager().getPackagePath(),
             () -> walkableGraph,
-            aqueryOptions);
+            aqueryOptions,
+            request
+                .getOptions(AqueryOptions.class)
+                .getLabelPrinter(starlarkSemantics, mainRepoTargetParser.getRepoMapping()));
     queryEnvironment.setActionFilters(actionFilters);
 
     return queryEnvironment;

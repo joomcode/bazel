@@ -1,10 +1,13 @@
-load("@rules_java//java:defs.bzl", "java_library")
+load("//src:build_defs.bzl", "java_11_library")
 
 # Description:
 #   Zip provides a library for reading and writing zip files, allowing more
 #   advanced manipulation than the JDK equivalents by providing detailed zip
 #   entry data and raw file access.
-package(default_visibility = ["//src/java_tools/singlejar:singlejar_package_group"])
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//src/java_tools/singlejar:singlejar_package_group"],
+)
 
 filegroup(
     name = "srcs",
@@ -18,7 +21,7 @@ filegroup(
     srcs = glob(["*.java"]),
 )
 
-java_library(
+java_11_library(
     name = "zip",
     srcs = glob(["*.java"]),
     visibility = ["//visibility:public"],

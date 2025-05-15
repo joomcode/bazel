@@ -26,8 +26,8 @@ import com.android.tools.r8.L8;
 import com.android.tools.r8.L8Command;
 import com.android.tools.r8.errors.InterfaceDesugarMissingTypeDiagnostic;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.android.Converters.ExistingPathConverter;
-import com.google.devtools.build.android.Converters.PathConverter;
+import com.google.devtools.build.android.r8.OptionsConverters.ExistingPathConverter;
+import com.google.devtools.build.android.r8.OptionsConverters.PathConverter;
 import com.google.devtools.build.android.r8.desugar.OrderedClassFileResourceProvider;
 import com.google.devtools.build.android.r8.desugar.OutputConsumer;
 import com.google.devtools.common.options.Option;
@@ -100,7 +100,7 @@ public class CoreLibraryDesugar {
 
     @Option(
         name = "min_sdk_version",
-        defaultValue = "13", // Same as Constants.MIN_API_LEVEL.
+        defaultValue = "19", // Same as Constants.MIN_API_LEVEL.
         category = "misc",
         documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
         effectTags = {OptionEffectTag.UNKNOWN},

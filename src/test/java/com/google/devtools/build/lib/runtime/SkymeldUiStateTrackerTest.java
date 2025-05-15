@@ -24,6 +24,7 @@ import com.google.devtools.build.lib.buildtool.BuildResult;
 import com.google.devtools.build.lib.buildtool.ExecutionProgressReceiver;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildCompleteEvent;
 import com.google.devtools.build.lib.buildtool.buildevent.ExecutionProgressReceiverAvailableEvent;
+import com.google.devtools.build.lib.cmdline.RepositoryMapping;
 import com.google.devtools.build.lib.pkgcache.LoadingPhaseCompleteEvent;
 import com.google.devtools.build.lib.runtime.SkymeldUiStateTracker.BuildStatus;
 import com.google.devtools.build.lib.skyframe.ConfigurationPhaseStartedEvent;
@@ -50,44 +51,43 @@ public class SkymeldUiStateTrackerTest extends FoundationTestCase {
     ManualClock clock = new ManualClock();
     SkymeldUiStateTracker uiStateTracker = new SkymeldUiStateTracker(clock);
 
+    assertThat(uiStateTracker.getBuildStatus()).isEqualTo(BuildStatus.BUILD_NOT_STARTED);
     uiStateTracker.buildStarted();
-    assertThat(uiStateTracker.buildStatus).isEqualTo(BuildStatus.BUILD_STARTED);
+    assertThat(uiStateTracker.getBuildStatus()).isEqualTo(BuildStatus.BUILD_STARTED);
   }
 
   @Test
   public void loadingStarted_stateChanges() {
     ManualClock clock = new ManualClock();
     SkymeldUiStateTracker uiStateTracker = new SkymeldUiStateTracker(clock);
-    uiStateTracker.buildStatus = BuildStatus.BUILD_STARTED;
 
     uiStateTracker.loadingStarted(
         new LoadingPhaseStartedEvent(mock(PackageProgressReceiver.class)));
 
-    assertThat(uiStateTracker.buildStatus).isEqualTo(BuildStatus.TARGET_PATTERN_PARSING);
+    assertThat(uiStateTracker.getBuildStatus()).isEqualTo(BuildStatus.TARGET_PATTERN_PARSING);
   }
 
   @Test
   public void loadingComplete_stateChanges() {
     ManualClock clock = new ManualClock();
     SkymeldUiStateTracker uiStateTracker = new SkymeldUiStateTracker(clock);
-    uiStateTracker.buildStatus = BuildStatus.TARGET_PATTERN_PARSING;
 
     uiStateTracker.loadingComplete(
-        new LoadingPhaseCompleteEvent(ImmutableSet.of(), ImmutableSet.of()));
+        new LoadingPhaseCompleteEvent(
+            ImmutableSet.of(), ImmutableSet.of(), RepositoryMapping.ALWAYS_FALLBACK));
 
-    assertThat(uiStateTracker.buildStatus).isEqualTo(BuildStatus.LOADING_COMPLETE);
+    assertThat(uiStateTracker.getBuildStatus()).isEqualTo(BuildStatus.LOADING_COMPLETE);
   }
 
   @Test
   public void configurationStarted_stateChanges() {
     ManualClock clock = new ManualClock();
     SkymeldUiStateTracker uiStateTracker = new SkymeldUiStateTracker(clock);
-    uiStateTracker.buildStatus = BuildStatus.LOADING_COMPLETE;
 
     uiStateTracker.configurationStarted(
         new ConfigurationPhaseStartedEvent(mock(ConfiguredTargetProgressReceiver.class)));
 
-    assertThat(uiStateTracker.buildStatus).isEqualTo(BuildStatus.CONFIGURATION);
+    assertThat(uiStateTracker.getBuildStatus()).isEqualTo(BuildStatus.CONFIGURATION);
   }
 
   @Test
@@ -95,7 +95,7 @@ public class SkymeldUiStateTrackerTest extends FoundationTestCase {
     ManualClock clock = new ManualClock();
     SkymeldUiStateTracker uiStateTracker = new SkymeldUiStateTracker(clock);
     String additionalMessage = "5 targets";
-    uiStateTracker.buildStatus = BuildStatus.CONFIGURATION;
+    uiStateTracker.setBuildStatusForTestingOnly(BuildStatus.CONFIGURATION);
     uiStateTracker.additionalMessage = additionalMessage;
 
     // First we need to set up the state tracker to already be analysing.
@@ -113,7 +113,7 @@ public class SkymeldUiStateTrackerTest extends FoundationTestCase {
     uiStateTracker.progressReceiverAvailable(
         new ExecutionProgressReceiverAvailableEvent(executionProgressReceiver));
 
-    assertThat(uiStateTracker.buildStatus).isEqualTo(BuildStatus.ANALYSIS_AND_EXECUTION);
+    assertThat(uiStateTracker.getBuildStatus()).isEqualTo(BuildStatus.ANALYSIS_AND_EXECUTION);
 
     LoggingTerminalWriter terminalWriter = new LoggingTerminalWriter(/*discardHighlight=*/ true);
     uiStateTracker.writeProgressBar(terminalWriter);
@@ -124,33 +124,31 @@ public class SkymeldUiStateTrackerTest extends FoundationTestCase {
     assertThat(output).contains(loadingState);
     assertThat(output).contains(loadingActivity);
     assertThat(output).contains(configuredTargetProgressString);
-    assertThat(output).contains("[0 / 0]");
+    assertThat(output).doesNotContain("[0 / 0]");
   }
 
   @Test
   public void executionFromAnalysisAndExecution_stateChanges() {
     ManualClock clock = new ManualClock();
     SkymeldUiStateTracker uiStateTracker = new SkymeldUiStateTracker(clock);
-    uiStateTracker.buildStatus = BuildStatus.ANALYSIS_AND_EXECUTION;
 
     uiStateTracker.analysisComplete();
 
-    assertThat(uiStateTracker.buildStatus).isEqualTo(BuildStatus.EXECUTION);
+    assertThat(uiStateTracker.getBuildStatus()).isEqualTo(BuildStatus.EXECUTION);
   }
 
   @Test
   public void buildCompleted_stateChanges() {
     ManualClock clock = new ManualClock();
     SkymeldUiStateTracker uiStateTracker = new SkymeldUiStateTracker(clock);
-    uiStateTracker.buildStatus = BuildStatus.EXECUTION;
 
     BuildResult buildResult = new BuildResult(clock.currentTimeMillis());
     buildResult.setDetailedExitCode(DetailedExitCode.success());
     clock.advanceMillis(SECONDS.toMillis(1));
     buildResult.setStopTime(clock.currentTimeMillis());
-    uiStateTracker.buildComplete(new BuildCompleteEvent(buildResult));
+    var unused = uiStateTracker.buildComplete(new BuildCompleteEvent(buildResult));
 
-    assertThat(uiStateTracker.buildStatus).isEqualTo(BuildStatus.BUILD_COMPLETED);
+    assertThat(uiStateTracker.getBuildStatus()).isEqualTo(BuildStatus.BUILD_COMPLETED);
   }
 
   @Test
@@ -190,7 +188,6 @@ public class SkymeldUiStateTrackerTest extends FoundationTestCase {
 
     // Mock starting loading.
     LoggingTerminalWriter terminalWriter = new LoggingTerminalWriter(/*discardHighlight=*/ false);
-    uiStateTracker.buildStatus = BuildStatus.TARGET_PATTERN_PARSING;
     uiStateTracker.packageProgressReceiver =
         mockPackageProgressReceiver(loadingState, loadingActivity);
 
@@ -240,7 +237,6 @@ public class SkymeldUiStateTrackerTest extends FoundationTestCase {
     // Mock starting configuration.
     uiStateTracker.configuredTargetProgressReceiver =
         mockConfiguredTargetProgressReceiver(configuredTargetProgressString);
-    uiStateTracker.buildStatus = BuildStatus.CONFIGURATION;
 
     // Output should contain both loading and analysis related output.
     uiStateTracker.writeLoadingAnalysisPhaseProgress(

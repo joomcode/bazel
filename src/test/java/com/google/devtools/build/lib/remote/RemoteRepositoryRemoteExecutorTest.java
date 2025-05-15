@@ -25,7 +25,10 @@ import build.bazel.remote.execution.v2.ActionResult;
 import build.bazel.remote.execution.v2.ExecuteResponse;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedMap;
+import com.google.common.eventbus.EventBus;
+import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.remote.common.RemoteCacheClient.CachedActionResult;
 import com.google.devtools.build.lib.remote.common.RemoteExecutionClient;
 import com.google.devtools.build.lib.remote.util.DigestUtil;
@@ -66,7 +69,8 @@ public class RemoteRepositoryRemoteExecutorTest {
             "none",
             "none",
             /* remoteInstanceName= */ "foo",
-            /* acceptCached= */ true);
+            /* acceptCached= */ true,
+            new Reporter(new EventBus()));
   }
 
   @Test
@@ -75,7 +79,11 @@ public class RemoteRepositoryRemoteExecutorTest {
 
     // Arrange
     ActionResult cachedResult = ActionResult.newBuilder().setExitCode(0).build();
-    when(remoteCache.downloadActionResult(any(), any(), /* inlineOutErr= */ eq(true)))
+    when(remoteCache.downloadActionResult(
+            any(),
+            any(),
+            /* inlineOutErr= */ eq(true),
+            /* inlineOutputFiles= */ eq(ImmutableSet.of())))
         .thenReturn(CachedActionResult.remote(cachedResult));
 
     // Act
@@ -89,7 +97,9 @@ public class RemoteRepositoryRemoteExecutorTest {
             /* timeout= */ Duration.ZERO);
 
     // Assert
-    verify(remoteCache).downloadActionResult(any(), any(), anyBoolean());
+    verify(remoteCache)
+        .downloadActionResult(
+            any(), any(), anyBoolean(), /* inlineOutputFiles= */ eq(ImmutableSet.of()));
     // Don't fallback to execution
     verify(remoteExecutor, never()).executeRemotely(any(), any(), any());
 
@@ -102,7 +112,11 @@ public class RemoteRepositoryRemoteExecutorTest {
 
     // Arrange
     ActionResult cachedResult = ActionResult.newBuilder().setExitCode(1).build();
-    when(remoteCache.downloadActionResult(any(), any(), /* inlineOutErr= */ eq(true)))
+    when(remoteCache.downloadActionResult(
+            any(),
+            any(),
+            /* inlineOutErr= */ eq(true),
+            /* inlineOutputFiles= */ eq(ImmutableSet.of())))
         .thenReturn(CachedActionResult.remote(cachedResult));
 
     ExecuteResponse response = ExecuteResponse.newBuilder().setResult(cachedResult).build();
@@ -119,7 +133,9 @@ public class RemoteRepositoryRemoteExecutorTest {
             /* timeout= */ Duration.ZERO);
 
     // Assert
-    verify(remoteCache).downloadActionResult(any(), any(), anyBoolean());
+    verify(remoteCache)
+        .downloadActionResult(
+            any(), any(), anyBoolean(), /* inlineOutputFiles= */ eq(ImmutableSet.of()));
     // Fallback to execution
     verify(remoteExecutor).executeRemotely(any(), any(), any());
 
@@ -139,7 +155,11 @@ public class RemoteRepositoryRemoteExecutorTest {
             .setStdoutRaw(ByteString.copyFrom(stdout))
             .setStderrRaw(ByteString.copyFrom(stderr))
             .build();
-    when(remoteCache.downloadActionResult(any(), any(), /* inlineOutErr= */ eq(true)))
+    when(remoteCache.downloadActionResult(
+            any(),
+            any(),
+            /* inlineOutErr= */ eq(true),
+            /* inlineOutputFiles= */ eq(ImmutableSet.of())))
         .thenReturn(CachedActionResult.remote(cachedResult));
 
     ExecuteResponse response = ExecuteResponse.newBuilder().setResult(cachedResult).build();
@@ -156,7 +176,12 @@ public class RemoteRepositoryRemoteExecutorTest {
             /* timeout= */ Duration.ZERO);
 
     // Assert
-    verify(remoteCache).downloadActionResult(any(), any(), /* inlineOutErr= */ eq(true));
+    verify(remoteCache)
+        .downloadActionResult(
+            any(),
+            any(),
+            /* inlineOutErr= */ eq(true),
+            /* inlineOutputFiles= */ eq(ImmutableSet.of()));
 
     assertThat(executionResult.exitCode()).isEqualTo(0);
     assertThat(executionResult.stdout()).isEqualTo(stdout);

@@ -24,6 +24,7 @@ import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.query2.PostAnalysisQueryEnvironment;
+import com.google.devtools.build.lib.query2.common.CqueryNode;
 import com.google.devtools.build.lib.query2.engine.QueryExpression;
 import com.google.devtools.build.lib.query2.engine.QueryParser;
 import java.io.ByteArrayOutputStream;
@@ -33,6 +34,7 @@ import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -71,7 +73,7 @@ public class FilesOutputFormatterCallbackTest extends ConfiguredTargetQueryTest 
         "            runfiles = ctx.runfiles([runfile]),",
         "        ),",
         "        OutputGroupInfo(",
-        "            foobar = [output_group_only],",
+        "            foobar = [output_group_only, ctx.file.explicit_source_dep],",
         "        ),",
         "    ]",
         "r = rule(",
@@ -110,7 +112,7 @@ public class FilesOutputFormatterCallbackTest extends ConfiguredTargetQueryTest 
     QueryExpression expression = QueryParser.parse(queryExpression, getDefaultFunctions());
     Set<String> targetPatternSet = new LinkedHashSet<>();
     expression.collectTargetPatterns(targetPatternSet);
-    PostAnalysisQueryEnvironment<KeyedConfiguredTarget> env =
+    PostAnalysisQueryEnvironment<CqueryNode> env =
         ((ConfiguredTargetQueryHelper) helper).getPostAnalysisQueryEnvironment(targetPatternSet);
 
     ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -134,21 +136,34 @@ public class FilesOutputFormatterCallbackTest extends ConfiguredTargetQueryTest 
   @Test
   public void basicQuery_defaultOutputGroup() throws Exception {
     List<String> output = getOutput("//pkg:all", ImmutableList.of());
+    var sourceAndGeneratedFiles =
+        output.stream()
+            .collect(Collectors.<String>partitioningBy(path -> path.matches("^[^/]*-out/.*")));
+    assertThat(sourceAndGeneratedFiles.get(false)).containsExactly("pkg/BUILD", "defs/rules.bzl");
     assertContainsExactlyWithBinDirPrefix(
-        output, "pkg/main_default_file", "pkg/other_default_file");
+        sourceAndGeneratedFiles.get(true), "pkg/main_default_file", "pkg/other_default_file");
   }
 
   @Test
   public void basicQuery_defaultAndCustomOutputGroup() throws Exception {
     List<String> output = getOutput("//pkg:main", ImmutableList.of("+foobar"));
+    var sourceAndGeneratedFiles =
+        output.stream()
+            .collect(Collectors.<String>partitioningBy(path -> path.matches("^[^/]*-out/.*")));
+    assertThat(sourceAndGeneratedFiles.get(false)).containsExactly("pkg/BUILD", "defs/rules.bzl");
     assertContainsExactlyWithBinDirPrefix(
-        output, "pkg/main_default_file", "pkg/main_output_group_only");
+        sourceAndGeneratedFiles.get(true), "pkg/main_default_file", "pkg/main_output_group_only");
   }
 
   @Test
   public void basicQuery_customOutputGroupOnly() throws Exception {
     List<String> output = getOutput("//pkg:other", ImmutableList.of("foobar"));
-    assertContainsExactlyWithBinDirPrefix(output, "pkg/other_output_group_only");
+    var sourceAndGeneratedFiles =
+        output.stream()
+            .collect(Collectors.<String>partitioningBy(path -> path.matches("^[^/]*-out/.*")));
+    assertThat(sourceAndGeneratedFiles.get(false)).containsExactly("pkg/BUILD");
+    assertContainsExactlyWithBinDirPrefix(
+        sourceAndGeneratedFiles.get(true), "pkg/other_output_group_only");
   }
 
   private void assertContainsExactlyWithBinDirPrefix(

@@ -71,12 +71,18 @@ public class AndroidSdkBase implements RuleConfiguredTargetFactory {
     Artifact frameworkAidl = ruleContext.getPrerequisiteArtifact("framework_aidl");
     TransitiveInfoCollection aidlLib = ruleContext.getPrerequisite("aidl_lib");
     Artifact androidJar = ruleContext.getPrerequisiteArtifact("android_jar");
-    Artifact sourceProperties = ruleContext.getHostPrerequisiteArtifact("source_properties");
+    Artifact sourceProperties = ruleContext.getPrerequisiteArtifact("source_properties");
     Artifact shrinkedAndroidJar = ruleContext.getPrerequisiteArtifact("shrinked_android_jar");
     Artifact mainDexClasses = ruleContext.getPrerequisiteArtifact("main_dex_classes");
     BootClassPathInfo system = ruleContext.getPrerequisite("system", BootClassPathInfo.PROVIDER);
     FilesToRunProvider legacyMainDexListGenerator =
         ruleContext.getExecutablePrerequisite("legacy_main_dex_list_generator");
+
+    // Make android_sdk backward compatible with older bazel
+    boolean dexDumpNotDefined =
+        ruleContext.getPrerequisites("dexdump", FilesToRunProvider.class).isEmpty();
+    FilesToRunProvider dexdump =
+        dexDumpNotDefined ? null : ruleContext.getExecutablePrerequisite("dexdump");
 
     if (ruleContext.hasErrors()) {
       return null;
@@ -102,7 +108,8 @@ public class AndroidSdkBase implements RuleConfiguredTargetFactory {
             proguard,
             zipalign,
             system,
-            legacyMainDexListGenerator);
+            legacyMainDexListGenerator,
+            dexdump);
 
     return new RuleConfiguredTargetBuilder(ruleContext)
         .addNativeDeclaredProvider(sdk)

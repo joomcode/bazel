@@ -15,6 +15,7 @@ package com.google.devtools.build.lib.worker;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.exec.TreeDeleter;
 import com.google.devtools.build.lib.sandbox.SandboxHelpers;
 import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxInputs;
 import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxOutputs;
@@ -23,32 +24,44 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.io.IOException;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 
 /** Creates and manages the contents of a working directory of a persistent worker. */
 final class WorkerExecRoot {
   private final Path workDir;
+  private final List<PathFragment> extraDirs;
 
-  public WorkerExecRoot(Path workDir) {
+  /**
+   * Creates a new WorkerExecRoot.
+   *
+   * @param workDir The directory (workspace dir) that the worker will be executing in.
+   * @param extraDirs Directories that must survive sandbox cleanup, e.g. for things that are
+   *     bind-mounted.
+   */
+  public WorkerExecRoot(Path workDir, List<PathFragment> extraDirs) {
     this.workDir = workDir;
+    this.extraDirs = extraDirs;
   }
 
   public void createFileSystem(
-      Set<PathFragment> workerFiles, SandboxInputs inputs, SandboxOutputs outputs)
-      throws IOException {
+      Set<PathFragment> workerFiles,
+      SandboxInputs inputs,
+      SandboxOutputs outputs,
+      TreeDeleter treeDeleter)
+      throws IOException, InterruptedException {
     workDir.createDirectoryAndParents();
 
     // First compute all the inputs and directories that we need. This is based only on
     // `workerFiles`, `inputs` and `outputs` and won't do any I/O.
     Set<PathFragment> inputsToCreate = new LinkedHashSet<>();
-    LinkedHashSet<PathFragment> dirsToCreate = new LinkedHashSet<>();
+    LinkedHashSet<PathFragment> dirsToCreate = new LinkedHashSet<>(extraDirs);
     SandboxHelpers.populateInputsAndDirsToCreate(
         ImmutableSet.of(),
         inputsToCreate,
         dirsToCreate,
         Iterables.concat(workerFiles, inputs.getFiles().keySet(), inputs.getSymlinks().keySet()),
-        outputs.files(),
-        outputs.dirs());
+        outputs);
 
     // Then do a full traversal of the parent directory of `workDir`. This will use what we computed
     // above, delete anything unnecessary and update `inputsToCreate`/`dirsToCreate` if something is
@@ -56,7 +69,7 @@ final class WorkerExecRoot {
     // We're traversing from workDir's parent directory because external repositories can now be
     // symlinked as siblings of workDir when --experimental_sibling_repository_layout is in effect.
     SandboxHelpers.cleanExisting(
-        workDir.getParentDirectory(), inputs, inputsToCreate, dirsToCreate, workDir);
+        workDir.getParentDirectory(), inputs, inputsToCreate, dirsToCreate, workDir, treeDeleter);
 
     // Finally, create anything that is still missing. This is non-strict only for historical
     // reasons,
@@ -66,8 +79,11 @@ final class WorkerExecRoot {
   }
 
   static void createInputs(Iterable<PathFragment> inputsToCreate, SandboxInputs inputs, Path dir)
-      throws IOException {
+      throws IOException, InterruptedException {
     for (PathFragment fragment : inputsToCreate) {
+      if (Thread.interrupted()) {
+        throw new InterruptedException();
+      }
       Path key = dir.getRelative(fragment);
       if (inputs.getFiles().containsKey(fragment)) {
         Path fileDest = inputs.getFiles().get(fragment);

@@ -15,6 +15,7 @@
 
 package com.google.devtools.build.lib.vfs;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 
 import com.google.common.base.Preconditions;
@@ -38,6 +39,10 @@ import javax.annotation.Nullable;
 /** This interface models a file system. */
 @ThreadSafe
 public abstract class FileSystem {
+
+  // The maximum number of symbolic links that may be traversed by resolveSymbolicLinks() while
+  // canonicalizing a path before it gives up and throws a FileSymlinkLoopException.
+  public static final int MAX_SYMLINKS = 32;
 
   private final DigestHashFunction digestFunction;
 
@@ -127,7 +132,7 @@ public abstract class FileSystem {
    * this method returns {@code false}. The implementation can try to emulate these calls at its own
    * discretion.
    */
-  protected abstract boolean supportsHardLinksNatively(PathFragment path);
+  public abstract boolean supportsHardLinksNatively(PathFragment path);
 
   /***
    * Returns true if file path is case-sensitive on this file system. Default is true.
@@ -184,7 +189,19 @@ public abstract class FileSystem {
    * <p>This method is not atomic -- concurrent modifications for the same path will result in
    * undefined behavior.
    */
-  protected abstract boolean createWritableDirectory(PathFragment path) throws IOException;
+  protected boolean createWritableDirectory(PathFragment path) throws IOException {
+    FileStatus stat = statNullable(path, /* followSymlinks= */ false);
+    if (stat == null) {
+      return createDirectory(path);
+    }
+
+    if (!stat.isDirectory()) {
+      throw new IOException(path + " (Not a directory)");
+    }
+
+    chmod(path, 0777);
+    return false;
+  }
 
   /**
    * Creates all directories up to the path. See {@link Path#createDirectoryAndParents} for
@@ -318,6 +335,7 @@ public abstract class FileSystem {
    * filesystem doesn't support them. This digest should be suitable for detecting changes to the
    * file.
    */
+  @Nullable
   protected byte[] getFastDigest(PathFragment path) throws IOException {
     return null;
   }
@@ -348,7 +366,7 @@ public abstract class FileSystem {
   /**
    * Appends a single regular path segment 'child' to 'dir', recursively resolving symbolic links in
    * 'child'. 'dir' must be canonical. 'maxLinks' is the maximum number of symbolic links that may
-   * be traversed before it gives up (the Linux kernel uses 32).
+   * be traversed before it gives up.
    *
    * <p>(This method does not need to be synchronized; but the result may be stale in the case of
    * concurrent modification.)
@@ -420,15 +438,17 @@ public abstract class FileSystem {
   }
 
   /**
-   * Returns the canonical path for the given path. See {@link Path#resolveSymbolicLinks} for
-   * specification.
+   * Returns the canonical path for the given path, which must be absolute. See {@link
+   * Path#resolveSymbolicLinks} for specification.
    */
   protected Path resolveSymbolicLinks(PathFragment path) throws IOException {
+    checkArgument(path.isAbsolute());
     PathFragment parentNode = path.getParentDirectory();
     return parentNode == null
         ? getPath(path) // (root)
         : getPath(
-            appendSegment(resolveSymbolicLinks(parentNode).asFragment(), path.getBaseName(), 32));
+            appendSegment(
+                resolveSymbolicLinks(parentNode).asFragment(), path.getBaseName(), MAX_SYMLINKS));
   }
 
   /**
@@ -592,13 +612,13 @@ public abstract class FileSystem {
 
   /**
    * Returns a collection containing the names of all entities within the directory denoted by the
-   * {@code path}.
+   * {@code path}. Symlinks are followed when resolving the directory whose entries are to be read.
    *
    * @throws IOException if there was an error reading the directory entries
    */
   protected abstract Collection<String> getDirectoryEntries(PathFragment path) throws IOException;
 
-  protected static Dirent.Type direntFromStat(FileStatus stat) {
+  protected static Dirent.Type direntFromStat(@Nullable FileStatus stat) {
     if (stat == null) {
       return Dirent.Type.UNKNOWN;
     } else if (stat.isSpecialFile()) {
@@ -709,6 +729,7 @@ public abstract class FileSystem {
   /**
    * Creates an InputStream accessing the file denoted by the path.
    *
+   * @throws FileNotFoundException if the file does not exist
    * @throws IOException if there was an error opening the file for reading
    */
   protected abstract InputStream getInputStream(PathFragment path) throws IOException;
@@ -738,7 +759,7 @@ public abstract class FileSystem {
    * @throws IOException if there was an error opening the file for writing
    */
   protected final OutputStream getOutputStream(PathFragment path) throws IOException {
-    return getOutputStream(path, false);
+    return getOutputStream(path, /* append= */ false);
   }
 
   /**
@@ -747,8 +768,10 @@ public abstract class FileSystem {
    * @param append whether to open the output stream in append mode
    * @throws IOException if there was an error opening the file for writing
    */
-  protected abstract OutputStream getOutputStream(PathFragment path, boolean append)
-      throws IOException;
+  protected final OutputStream getOutputStream(PathFragment path, boolean append)
+      throws IOException {
+    return getOutputStream(path, append, /* internal= */ false);
+  }
 
   /**
    * Creates an OutputStream accessing the file denoted by path.
@@ -763,6 +786,8 @@ public abstract class FileSystem {
   /**
    * Renames the file denoted by "sourceNode" to the location "targetNode". See {@link
    * Path#renameTo} for specification.
+   *
+   * <p>Implementations must be atomic.
    */
   public abstract void renameTo(PathFragment sourcePath, PathFragment targetPath)
       throws IOException;

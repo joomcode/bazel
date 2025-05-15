@@ -13,10 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis.config;
 
-import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableCollection;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.config.transitions.ConfigurationTransition;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.starlarkbuildapi.FragmentCollectionApi;
 import javax.annotation.Nullable;
@@ -27,11 +25,9 @@ import net.starlark.java.eval.EvalException;
 @Immutable
 public class FragmentCollection implements FragmentCollectionApi {
   private final RuleContext ruleContext;
-  private final ConfigurationTransition transition;
 
-  public FragmentCollection(RuleContext ruleContext, ConfigurationTransition transition) {
+  public FragmentCollection(RuleContext ruleContext) {
     this.ruleContext = ruleContext;
-    this.transition = transition;
   }
 
   @Override
@@ -42,33 +38,16 @@ public class FragmentCollection implements FragmentCollectionApi {
   @Override
   @Nullable
   public Object getValue(String name) throws EvalException {
-    return ruleContext.getStarlarkFragment(name, transition);
+    return ruleContext.getStarlarkFragment(name);
   }
 
   @Override
   public ImmutableCollection<String> getFieldNames() {
-    return ruleContext.getStarlarkFragmentNames(transition);
-  }
-
-  @Override
-  @Nullable
-  public String getErrorMessageForUnknownField(String name) {
-    return String.format(
-        "There is no configuration fragment named '%s' in %s configuration. "
-        + "Available fragments: %s",
-        name, getConfigurationName(transition), fieldsToString());
-  }
-
-  private String fieldsToString() {
-    return String.format("'%s'", Joiner.on("', '").join(getFieldNames()));
-  }
-
-  public static String getConfigurationName(ConfigurationTransition config) {
-    return config.isHostTransition() ? "host" : "target";
+    return ruleContext.getStarlarkFragmentNames();
   }
 
   @Override
   public String toString() {
-    return getConfigurationName(transition) + ": [ " + fieldsToString() + "]";
+    return "[ " + fieldsToString() + "]";
   }
 }

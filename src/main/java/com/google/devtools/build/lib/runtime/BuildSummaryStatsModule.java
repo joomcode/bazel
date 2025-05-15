@@ -31,6 +31,9 @@ import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.exec.ExecutorBuilder;
+import com.google.devtools.build.lib.metrics.criticalpath.AggregatedCriticalPath;
+import com.google.devtools.build.lib.metrics.criticalpath.CriticalPathComponent;
+import com.google.devtools.build.lib.metrics.criticalpath.CriticalPathComputer;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
 import com.google.devtools.build.lib.profiler.SilentCloseable;
@@ -89,7 +92,7 @@ public class BuildSummaryStatsModule extends BlazeModule {
     enabled = env.getOptions().getOptions(ExecutionOptions.class).enableCriticalPathProfiling;
     statsSummary = env.getOptions().getOptions(ExecutionOptions.class).statsSummary;
     if (enabled) {
-      criticalPathComputer = new CriticalPathComputer(actionKeyContext, BlazeClock.instance());
+      criticalPathComputer = new CriticalPathComputer(actionKeyContext);
       eventBus.register(criticalPathComputer);
     }
   }

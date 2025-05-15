@@ -51,7 +51,9 @@ public class BzlLoadCycleReporter implements CyclesReporter.SingleCycleReporter 
       SkyFunctions.isSkyFunction(SkyFunctions.BZL_LOAD);
 
   private static final Predicate<SkyKey> IS_BZLMOD_EXTENSION =
-      SkyFunctions.isSkyFunction(SkyFunctions.SINGLE_EXTENSION_EVAL);
+      Predicates.or(
+          SkyFunctions.isSkyFunction(SkyFunctions.SINGLE_EXTENSION),
+          SkyFunctions.isSkyFunction(SkyFunctions.SINGLE_EXTENSION_EVAL));
 
   private static void requestRepoDefinitions(
       ExtendedEventHandler eventHandler, Iterable<SkyKey> repos) {
@@ -88,8 +90,9 @@ public class BzlLoadCycleReporter implements CyclesReporter.SingleCycleReporter 
             || IS_WORKSPACE_FILE.apply(lastPathElement)
             || IS_BZLMOD_EXTENSION.apply(lastPathElement))) {
 
-      Function<SkyKey, String> printer =
-          input -> {
+      Function<Object, String> printer =
+          rawInput -> {
+            SkyKey input = (SkyKey) rawInput;
             if (input.argument() instanceof BzlLoadValue.Key) {
               return ((BzlLoadValue.Key) input.argument()).getLabel().toString();
             }
@@ -135,10 +138,10 @@ public class BzlLoadCycleReporter implements CyclesReporter.SingleCycleReporter 
       StringBuilder cycleMessage =
           new StringBuilder().append("Circular definition of repositories:");
       Iterable<SkyKey> repos = Iterables.filter(cycle, IS_REPOSITORY_DIRECTORY);
-      Function<SkyKey, String> printer =
+      Function<Object, String> printer =
           input -> {
             if (input instanceof RepositoryDirectoryValue.Key) {
-              return ((RepositoryDirectoryValue.Key) input).argument().getNameWithAt();
+              return ((RepositoryDirectoryValue.Key) input).argument().toString();
             } else {
               throw new UnsupportedOperationException();
             }
@@ -171,7 +174,7 @@ public class BzlLoadCycleReporter implements CyclesReporter.SingleCycleReporter 
         if (repo instanceof RepositoryDirectoryValue.Key) {
           message
               .append(" - ")
-              .append(((RepositoryDirectoryValue.Key) repo).argument().getNameWithAt())
+              .append(((RepositoryDirectoryValue.Key) repo).argument())
               .append("\n");
         }
       }
@@ -179,7 +182,7 @@ public class BzlLoadCycleReporter implements CyclesReporter.SingleCycleReporter 
       if (missingRepo instanceof RepositoryDirectoryValue.Key) {
         message
             .append("This could either mean you have to add the '")
-            .append(((RepositoryDirectoryValue.Key) missingRepo).argument().getNameWithAt())
+            .append(((RepositoryDirectoryValue.Key) missingRepo).argument())
             .append("' repository with a statement like `http_archive` in your WORKSPACE file")
             .append(" (note that transitive dependencies are not added automatically), or move")
             .append(" an existing definition earlier in your WORKSPACE file.");

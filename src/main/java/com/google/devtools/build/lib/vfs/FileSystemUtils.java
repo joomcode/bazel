@@ -429,6 +429,8 @@ public class FileSystemUtils {
    * "to". If "from" is a regular file, its last modified time, executable and writable bits are
    * also preserved. Symlinks are also supported but not directories or special files.
    *
+   * <p>This method is not guaranteed to be atomic. Use {@link Path#renameTo(Path)} instead.
+   *
    * <p>If the move fails (usually because the "from" and "to" live in different file systems), this
    * falls back to copying the file. Note that these two operations have very different performance
    * characteristics and is why this operation reports back to the caller what actually happened.
@@ -600,6 +602,10 @@ public class FileSystemUtils {
       throw new IllegalArgumentException(to + " is a subdirectory of " + from);
     }
 
+    // Actions can make output directories inaccessible, which would cause the move to fail.
+    from.chmod(0755);
+
+    // TODO(tjgq): Don't leave an empty directory behind.
     Collection<Path> entries = from.getDirectoryEntries();
     for (Path entry : entries) {
       if (entry.isDirectory(Symlinks.NOFOLLOW)) {
@@ -708,8 +714,8 @@ public class FileSystemUtils {
   }
 
   /**
-   * Writes lines to file using the given encoding, ending every line with a line break '\n'
-   * character.
+   * Writes lines to file using the given encoding, ending every line with a system specific line
+   * break character.
    */
   @ThreadSafe // but not atomic
   public static void writeLinesAs(Path file, Charset charset, String... lines) throws IOException {
@@ -717,8 +723,8 @@ public class FileSystemUtils {
   }
 
   /**
-   * Writes lines to file using the given encoding, ending every line with a line break '\n'
-   * character.
+   * Writes lines to file using the given encoding, ending every line with a system specific line
+   * break character.
    */
   @ThreadSafe // but not atomic
   public static void writeLinesAs(Path file, Charset charset, Iterable<String> lines)
@@ -728,8 +734,19 @@ public class FileSystemUtils {
   }
 
   /**
-   * Appends lines to file using the given encoding, ending every line with a line break '\n'
+   * Writes lines to file using the given encoding, ending every line with a given line break
    * character.
+   */
+  @ThreadSafe // but not atomic
+  public static void writeLinesAs(
+      Path file, Charset charset, Iterable<String> lines, String lineBreak) throws IOException {
+    file.getParentDirectory().createDirectoryAndParents();
+    asByteSink(file).asCharSink(charset).writeLines(lines, lineBreak);
+  }
+
+  /**
+   * Appends lines to file using the given encoding, ending every line with a system specific line
+   * break character.
    */
   @ThreadSafe // but not atomic
   public static void appendLinesAs(Path file, Charset charset, String... lines) throws IOException {
@@ -737,8 +754,8 @@ public class FileSystemUtils {
   }
 
   /**
-   * Appends lines to file using the given encoding, ending every line with a line break '\n'
-   * character.
+   * Appends lines to file using the given encoding, ending every line with a system specific line
+   * break character.
    */
   @ThreadSafe // but not atomic
   public static void appendLinesAs(Path file, Charset charset, Iterable<String> lines)

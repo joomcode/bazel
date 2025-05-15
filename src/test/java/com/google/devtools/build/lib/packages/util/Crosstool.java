@@ -301,12 +301,24 @@ public final class Crosstool {
 
     public String getToolchainTargetConstraints() {
       ImmutableList<String> constraints = this.toolchainTargetConstraints;
-      if (constraints.isEmpty() && getTargetCpu().equals("k8")) {
-        // Use default constraints
-        constraints =
-            ImmutableList.of(
-                TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:x86_64",
-                TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:linux");
+      if (constraints.isEmpty()) {
+        if (getTargetCpu().equals("k8")) {
+          // Use default constraints
+          constraints =
+              ImmutableList.of(
+                  TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:x86_64",
+                  TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:linux");
+        } else if (getTargetCpu().equals("darwin_x86_64")) {
+          constraints =
+              ImmutableList.of(
+                  TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:x86_64",
+                  TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:macos");
+        } else if (getTargetCpu().equals("darwin_arm64")) {
+          constraints =
+              ImmutableList.of(
+                  TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:arm64",
+                  TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:macos");
+        }
       }
       return formatConstraints("target", constraints);
     }
@@ -563,6 +575,10 @@ public final class Crosstool {
                 "toolchain_type(name = 'toolchain_type')",
                 "toolchain_type(name = 'test_runner_toolchain_type')",
                 "cc_toolchain_alias(name = 'current_cc_toolchain')",
+                "cc_toolchain_alias(",
+                "    name = 'optional_current_cc_toolchain',",
+                "    mandatory = False,",
+                ")",
                 "alias(name = 'toolchain', actual = 'everything')",
                 "filegroup(name = 'everything-multilib',",
                 "          srcs = glob(['mock_version/**/*'],",
@@ -583,6 +599,8 @@ public final class Crosstool {
                 "    name = 'interface_library_builder',",
                 "    srcs = ['build_interface_so'],",
                 ")",
+                // We add a :link_extra_lib target in case we need it.
+                "cc_library(name = 'link_extra_lib', srcs = ['linkextra.cc'])",
                 // We add an empty :malloc target in case we need it.
                 "cc_library(name = 'malloc')",
                 // Fake targets to get us through loading/analysis.
@@ -610,8 +628,7 @@ public final class Crosstool {
     StringBuilder compilerMap =
         new StringBuilder()
             .append("'k8': ':cc-compiler-darwin_x86_64',\n")
-            .append("'aarch64': ':cc-compiler-darwin_x86_64',\n")
-            .append("'darwin': ':cc-compiler-darwin_x86_64',\n");
+            .append("'aarch64': ':cc-compiler-darwin_x86_64',\n");
     Set<String> seenCpus = new LinkedHashSet<>();
     for (CcToolchainConfig toolchain : ccToolchainConfigList) {
       if (seenCpus.add(toolchain.getTargetCpu())) {
@@ -722,15 +739,14 @@ public final class Crosstool {
           "    toolchain_type = '" + TestConstants.TOOLS_REPOSITORY + "//tools/cpp:toolchain_type'",
           ")");
       crosstoolBuild.add(toolchainConfig.getCcToolchainConfigRule());
-      // Add the newly-created toolchain to the WORKSPACE.
-      config.append(
-          "WORKSPACE",
-          "register_toolchains('//" + MockObjcSupport.DEFAULT_OSX_CROSSTOOL_DIR + ":all')");
     }
 
     config.overwrite(
         MockObjcSupport.DEFAULT_OSX_CROSSTOOL_DIR + "/BUILD",
         Joiner.on("\n").join(crosstoolBuild.build()));
+    config.append(
+        "WORKSPACE",
+        "register_toolchains('//" + MockObjcSupport.DEFAULT_OSX_CROSSTOOL_DIR + ":all')");
     config.overwrite(crosstoolTop + "/cc_toolchain_config.bzl", ccToolchainConfigFileContents);
   }
 }

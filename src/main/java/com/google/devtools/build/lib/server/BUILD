@@ -1,6 +1,9 @@
 load("@rules_java//java:defs.bzl", "java_library")
 
-package(default_visibility = ["//src:__subpackages__"])
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//src:__subpackages__"],
+)
 
 filegroup(
     name = "srcs",
@@ -11,14 +14,20 @@ filegroup(
 )
 
 java_library(
+    name = "idle_task",
+    srcs = ["IdleTask.java"],
+)
+
+java_library(
     name = "server",
     srcs = [
         "CommandManager.java",
         "GrpcServerImpl.java",
-        "IdleServerTasks.java",
+        "IdleTaskManager.java",
         "ServerWatcherRunnable.java",
     ],
     deps = [
+        ":idle_task",
         ":pid_file_watcher",
         ":rpc_server",
         ":shutdown_hooks",

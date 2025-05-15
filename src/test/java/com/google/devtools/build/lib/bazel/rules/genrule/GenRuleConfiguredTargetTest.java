@@ -393,7 +393,7 @@ public final class GenRuleConfiguredTargetTest extends BuildViewTestCase {
   }
 
   @Test
-  public void testToolsAreHostConfiguration() throws Exception {
+  public void testToolsAreExecConfiguration() throws Exception {
     scratch.file(
         "config/BUILD",
         "genrule(name='src', outs=['src.out'], cmd=':')",
@@ -423,6 +423,9 @@ public final class GenRuleConfiguredTargetTest extends BuildViewTestCase {
         case GENRULE_SETUP_PATH:
           assertThat(getConfiguration(prereq)).isNull();
           foundSetup = true;
+          break;
+        case "host":
+          // Ignore the dependency on the target platform.
           break;
         default:
           fail("unexpected prerequisite " + prereq + " (name: " + name + ")");
@@ -527,6 +530,7 @@ public final class GenRuleConfiguredTargetTest extends BuildViewTestCase {
         "u/BUILD",
         "genrule(name='foo_stamp', srcs=[], outs=['uu'], stamp=1, cmd='')",
         "genrule(name='foo_nostamp', srcs=[], outs=['vv'], stamp=0, cmd='')",
+        "genrule(name='foo_autostamp', srcs=[], outs=['aa'], stamp=-1, cmd='')",
         "genrule(name='foo_default', srcs=[], outs=['xx'], cmd='')");
   }
 
@@ -556,9 +560,11 @@ public final class GenRuleConfiguredTargetTest extends BuildViewTestCase {
     useConfiguration("--nostamp");
     createStampingTargets();
     assertStamped("//u:foo_stamp");
-    assertStamped(getHostConfiguredTarget("//u:foo_stamp"));
+    assertStamped(getExecConfiguredTarget("//u:foo_stamp"));
     assertNotStamped("//u:foo_nostamp");
-    assertNotStamped(getHostConfiguredTarget("//u:foo_nostamp"));
+    assertNotStamped(getExecConfiguredTarget("//u:foo_nostamp"));
+    assertNotStamped("//u:foo_autostamp");
+    assertNotStamped(getExecConfiguredTarget("//u:foo_autostamp"));
     assertNotStamped("//u:foo_default");
   }
 
@@ -567,9 +573,11 @@ public final class GenRuleConfiguredTargetTest extends BuildViewTestCase {
     useConfiguration("--stamp");
     createStampingTargets();
     assertStamped("//u:foo_stamp");
-    assertStamped(getHostConfiguredTarget("//u:foo_stamp"));
-    //assertStamped("//u:foo_nostamp");
-    assertNotStamped(getHostConfiguredTarget("//u:foo_nostamp"));
+    assertStamped(getExecConfiguredTarget("//u:foo_stamp"));
+    assertNotStamped("//u:foo_nostamp");
+    assertNotStamped(getExecConfiguredTarget("//u:foo_nostamp"));
+    assertStamped("//u:foo_autostamp");
+    assertNotStamped(getExecConfiguredTarget("//u:foo_autostamp"));
     assertNotStamped("//u:foo_default");
   }
 
@@ -614,22 +622,22 @@ public final class GenRuleConfiguredTargetTest extends BuildViewTestCase {
   }
 
   @Test
-  public void testExecToolsAreExecConfiguration() throws Exception {
+  public void testToolsHaveExecOutputDir() throws Exception {
     scratch.file(
         "config/BUILD",
         "genrule(name='src', outs=['src.out'], cmd=':')",
-        "genrule(name='exec_tool', outs=['exec_tool.out'], cmd=':')",
+        "genrule(name='tool', outs=['tool.out'], cmd=':')",
         "genrule(name='config', ",
-        "        srcs=[':src'], exec_tools=[':exec_tool'], outs=['out'],",
-        "        cmd='$(location :exec_tool)')");
+        "        srcs=[':src'], tools=[':tool'], outs=['out'],",
+        "        cmd='$(location :tool)')");
 
     ConfiguredTarget parentTarget = getConfiguredTarget("//config");
 
     // Cannot use getDirectPrerequisites, as this re-configures that target incorrectly.
     Artifact out = getFilesToBuild(parentTarget).toList().get(0);
     assertThat(getGeneratingAction(out).getTools().toList()).hasSize(1);
-    Artifact execTool = getGeneratingAction(out).getTools().getSingleton();
+    Artifact tool = getGeneratingAction(out).getTools().getSingleton();
     // This is the output dir fragment for the execution transition.
-    assertThat(execTool.getExecPathString()).contains("-exec-");
+    assertThat(tool.getExecPathString()).contains("-exec-");
   }
 }

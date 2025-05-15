@@ -115,6 +115,7 @@ class WindowsFileMtime : public IFileMtime {
 
   bool IsUntampered(const Path& path) override;
   bool SetToNow(const Path& path) override;
+  bool SetToNowIfPossible(const Path& path) override;
   bool SetToDistantFuture(const Path& path) override;
 
  private:
@@ -179,6 +180,19 @@ bool WindowsFileMtime::SetToNow(const Path& path) {
   return Set(path, GetNow());
 }
 
+bool WindowsFileMtime::SetToNowIfPossible(const Path& path) {
+  bool okay = this->SetToNow(path);
+  if (!okay) {
+    // `SetToNow` is backed by `CreateFileW` + `SetFileTime`; the former can
+    // return `ERROR_ACCESS_DENIED` if there's a permissions issue:
+    if (GetLastError() == ERROR_ACCESS_DENIED) {
+      okay = true;
+    }
+  }
+
+  return okay;
+}
+
 bool WindowsFileMtime::SetToDistantFuture(const Path& path) {
   return Set(path, distant_future_);
 }
@@ -216,7 +230,7 @@ FILETIME WindowsFileMtime::GetFuture(WORD years) {
   GetSystemTimeAsFileTime(&result);
 
   // 1 year in FILETIME.
-  constexpr ULONGLONG kOneYear = 365ULL * 24 * 60 * 60 * 10'000'000;
+  constexpr ULONGLONG kOneYear = 365ULL * 24 * 60 * 60 * 10000000;
 
   ULARGE_INTEGER result_value;
   result_value.LowPart = result.dwLowDateTime;
@@ -254,6 +268,11 @@ int ReadFromHandle(file_handle_type handle, void* data, size_t size,
 }
 
 bool ReadFile(const string& filename, string* content, int max_size) {
+  return ReadFile(filename, content, nullptr, max_size);
+}
+
+bool ReadFile(const string& filename, string* content, string* error_message,
+              int max_size) {
   if (IsDevNull(filename.c_str())) {
     // mimic read(2) behavior: we can always read 0 bytes from /dev/null
     content->clear();
@@ -265,8 +284,11 @@ bool ReadFile(const string& filename, string* content, int max_size) {
   std::string errorText;
   Path path = Path(filename, &errorText);
   if (!errorText.empty()) {
-    BAZEL_LOG(WARNING) << "Path is not valid: " << filename << " :"
-        << errorText;
+    std::string message = "Path is not valid: " + filename + " :" + errorText;
+    BAZEL_LOG(WARNING) << message;
+    if (error_message != nullptr) {
+      *error_message = std::move(message);
+    }
     return false;
   }
   return ReadFile(path, content, max_size);
@@ -346,6 +368,8 @@ bool WriteFile(const void* data, size_t size, const Path& path,
   ::WriteFile(handle, data, size, &actually_written, nullptr);
   return actually_written == size;
 }
+
+void InitializeStdOutErrForUtf8() { SetConsoleOutputCP(CP_UTF8); }
 
 int WriteToStdOutErr(const void* data, size_t size, bool to_stdout) {
   DWORD written = 0;

@@ -92,19 +92,12 @@ public class AndroidNdkRepositoryTest extends AndroidBuildViewTestCase {
     // Set up a fake @platforms repository.
     scratch.appendFile(
         "WORKSPACE", "local_repository(name = 'platforms', path = 'platforms_workspace')");
-    scratch.appendFile("WORKSPACE", "local_config_platform(name='local_config_platform')");
 
-    if (!scratch.resolve("platforms_workspace/WORKSPACE").exists()
-        || !scratch.resolve("local_config_platform_workspace/WORKSPACE").exists()) {
+    if (!scratch.resolve("platforms_workspace/WORKSPACE").exists()) {
       // Create the needed platforms and constraints if they don't already exist.
       scratch.file("platforms_workspace/WORKSPACE", "workspace(name = 'platforms')");
       MockPlatformSupport.setup(
-          mockToolsConfig,
-          "embedded_tools/platforms",
-          "@platforms//",
-          "platforms_workspace",
-          "@local_config_platform//",
-          "local_config_platform_workspace");
+          mockToolsConfig, "embedded_tools/platforms", "@platforms//", "platforms_workspace");
     }
   }
 
@@ -238,13 +231,13 @@ public class AndroidNdkRepositoryTest extends AndroidBuildViewTestCase {
 
     ConfiguredTargetAndData cpufeatures = getConfiguredTargetAndData("@androidndk//:cpufeatures");
     assertThat(cpufeatures).isNotNull();
-    Rule rule = cpufeatures.getTarget().getAssociatedRule();
+    Rule rule = cpufeatures.getTargetForTesting().getAssociatedRule();
     assertThat(rule.isAttributeValueExplicitlySpecified("srcs")).isTrue();
     assertThat(rule.getAttr("srcs").toString())
-        .isEqualTo("[@androidndk//:ndk/sources/android/cpufeatures/cpu-features.c]");
+        .isEqualTo("[@@androidndk//:ndk/sources/android/cpufeatures/cpu-features.c]");
     assertThat(rule.isAttributeValueExplicitlySpecified("hdrs")).isTrue();
     assertThat(rule.getAttr("hdrs").toString())
-        .isEqualTo("[@androidndk//:ndk/sources/android/cpufeatures/cpu-features.h]");
+        .isEqualTo("[@@androidndk//:ndk/sources/android/cpufeatures/cpu-features.h]");
   }
 
   @Test

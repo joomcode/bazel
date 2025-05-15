@@ -52,6 +52,7 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Symlinks;
 import com.google.devtools.build.lib.vfs.SyscallCache;
+import com.google.protobuf.ByteString;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Collection;
@@ -65,7 +66,7 @@ import javax.annotation.Nullable;
 public class SpawnIncludeScanner {
   /** The grep-includes tool is very lightweight, so don't use the default from AbstractAction. */
   private static final ResourceSet LOCAL_RESOURCES =
-      ResourceSet.createWithRamCpu(/*memoryMb=*/ 10, /*cpuUsage=*/ 1);
+      ResourceSet.createWithRamCpu(/* memoryMb= */ 10, /* cpu= */ 1);
 
   private final Path execRoot;
   private OutputService outputService;
@@ -182,7 +183,7 @@ public class SpawnIncludeScanner {
     }
 
     @Override
-    public boolean inputsDiscovered() {
+    public boolean inputsKnown() {
       throw new UnsupportedOperationException();
     }
 
@@ -198,6 +199,11 @@ public class SpawnIncludeScanner {
 
     @Override
     public NestedSet<Artifact> getInputs() {
+      return actionExecutionMetadata.getInputs();
+    }
+
+    @Override
+    public NestedSet<Artifact> getSchedulingDependencies() {
       throw new UnsupportedOperationException();
     }
 
@@ -346,6 +352,7 @@ public class SpawnIncludeScanner {
    *     Otherwise "null"
    * @throws ExecException if scanning fails
    */
+  @Nullable
   private static InputStream spawnGrep(
       Artifact input,
       PathFragment outputExecPath,
@@ -407,7 +414,11 @@ public class SpawnIncludeScanner {
     }
 
     SpawnResult result = Iterables.getLast(results);
-    return result.getInMemoryOutput(output);
+    ByteString includesContent = result.getInMemoryOutput(output);
+    if (includesContent != null) {
+      return includesContent.newInput();
+    }
+    return null;
   }
 
   private static void dump(ActionExecutionContext fromContext, ActionExecutionContext toContext) {

@@ -22,6 +22,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
+import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
@@ -29,9 +30,11 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.analysis.actions.FileWriteAction;
+import com.google.devtools.build.lib.analysis.util.AnalysisMock;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.analysis.util.MockRule;
 import com.google.devtools.build.lib.analysis.util.MockRuleDefaults;
+import com.google.devtools.build.lib.bazel.bzlmod.NonRegistryOverride;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.events.Event;
@@ -169,6 +172,17 @@ public class BuiltinsInjectionTest extends BuildViewTestCase {
   }
 
   @Override
+  protected AnalysisMock getAnalysisMock() {
+    return new AnalysisMock.Delegate(super.getAnalysisMock()) {
+      @Override
+      public ImmutableMap<String, NonRegistryOverride> getBuiltinModules(
+          BlazeDirectories directories) {
+        return ImmutableMap.of();
+      }
+    };
+  }
+
+  @Override
   protected void initializeMockClient() throws IOException {
     // Don't let the AnalysisMock sneak in any WORKSPACE file content, which may depend on
     // repository rules that our minimal rule class provider doesn't have.
@@ -192,8 +206,8 @@ public class BuiltinsInjectionTest extends BuildViewTestCase {
         .addRuleDefinition(SANDWICH_RULE)
         .addRuleDefinition(SANDWICH_LOGIC_RULE)
         .addRuleDefinition(SANDWICH_CTX_RULE)
-        .addStarlarkAccessibleTopLevels("overridable_symbol", "original_value")
-        .addStarlarkAccessibleTopLevels(
+        .addBzlToplevel("overridable_symbol", "original_value")
+        .addBzlToplevel(
             "flag_guarded_symbol",
             // For this mock symbol, we reuse the same flag that guards the production
             // _builtins_dummy symbol.
@@ -345,7 +359,7 @@ public class BuiltinsInjectionTest extends BuildViewTestCase {
   }
 
   @Test
-  public void otherBzlsCannotLoadFromBuiltins() throws Exception {
+  public void otherBzlsCannotLoadFromBuiltins_apparent() throws Exception {
     writeExportsBzl(
         "exported_toplevels = {}", //
         "exported_rules = {}",
@@ -354,7 +368,20 @@ public class BuiltinsInjectionTest extends BuildViewTestCase {
     writePkgBzl("load('@_builtins//:exports.bzl', 'exported_toplevels')");
 
     buildAndAssertFailure();
-    assertContainsEvent("The repository '@_builtins' could not be resolved");
+    assertContainsEvent("No repository visible as '@_builtins' from");
+  }
+
+  @Test
+  public void otherBzlsCannotLoadFromBuiltins_canonical() throws Exception {
+    writeExportsBzl(
+        "exported_toplevels = {}", //
+        "exported_rules = {}",
+        "exported_to_java = {}");
+    writePkgBuild();
+    writePkgBzl("load('@@_builtins//:exports.bzl', 'exported_toplevels')");
+
+    buildAndAssertFailure();
+    assertContainsEvent("The repository '@@_builtins' could not be resolved");
   }
 
   @Test
@@ -485,13 +512,8 @@ public class BuiltinsInjectionTest extends BuildViewTestCase {
     assertContainsEvent("In BUILD: overridable_rule :: <built-in rule overridable_rule>");
   }
 
-  // TODO(#11954): Once WORKSPACE- and BUILD-loaded bzls use the exact same environments, we'll want
-  // to apply injection to both. This is for uniformity, not because we actually care about builtins
-  // injection for WORKSPACE bzls. In the meantime, assert the status quo: WORKSPACE bzls do not use
-  // injection. WORKSPACE and BUILD files themselves probably won't be unified, so WORKSPACE will
-  // likely continue to not use injection.
   @Test
-  public void workspaceAndWorkspaceBzlDoNotUseInjection() throws Exception {
+  public void workspaceLoadedBzlUsesInjectionButNotWORKSPACE() throws Exception {
     writeExportsBzl(
         "exported_toplevels = {'overridable_symbol': 'new_value'}",
         "exported_rules = {'overridable_rule': 'new_rule'}",
@@ -510,9 +532,8 @@ public class BuiltinsInjectionTest extends BuildViewTestCase {
         "print('In bzl: overridable_symbol :: %s' % overridable_symbol)");
 
     buildAndAssertSuccess();
-    // Builtins for WORKSPACE bzls are populated essentially the same as for BUILD bzls, except that
-    // injection doesn't apply.
-    assertContainsEvent("In bzl: overridable_symbol :: original_value");
+    // Builtins for WORKSPACE bzls are populated the same as for BUILD bzls.
+    assertContainsEvent("In bzl: overridable_symbol :: new_value");
     // We don't assert that the rule isn't injected because the workspace native object doesn't
     // contain our original mock rule. We can test this for WORKSPACE files at the top-level though.
     assertContainsEvent("In WORKSPACE: overridable_rule :: <built-in function overridable_rule>");

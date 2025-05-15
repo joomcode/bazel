@@ -27,22 +27,30 @@ import com.google.devtools.build.lib.exec.RunfilesTreeUpdater;
 import com.google.devtools.build.lib.exec.SpawnStrategyRegistry;
 import com.google.devtools.build.lib.exec.local.LocalEnvProvider;
 import com.google.devtools.build.lib.runtime.BlazeModule;
+import com.google.devtools.build.lib.runtime.BlazeWorkspace;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.runtime.commands.events.CleanStartingEvent;
+import com.google.devtools.build.lib.sandbox.AsynchronousTreeDeleter;
+import com.google.devtools.build.lib.sandbox.LinuxSandboxUtil;
 import com.google.devtools.build.lib.sandbox.SandboxHelpers;
+import com.google.devtools.build.lib.sandbox.SandboxOptions;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.lib.worker.WorkerPool.WorkerPoolConfig;
+import com.google.devtools.build.lib.worker.SandboxedWorker.WorkerSandboxOptions;
+import com.google.devtools.build.lib.worker.WorkerPoolImpl.WorkerPoolConfig;
 import com.google.devtools.common.options.OptionsBase;
 import java.io.IOException;
 import javax.annotation.Nullable;
 
 /** A module that adds the WorkerActionContextProvider to the available action context providers. */
 public class WorkerModule extends BlazeModule {
+
+  private static final String STALE_TRASH = "_stale_trash";
   private CommandEnvironment env;
 
   private WorkerFactory workerFactory;
-  @VisibleForTesting WorkerPool workerPool;
+  private AsynchronousTreeDeleter treeDeleter;
+  @VisibleForTesting WorkerPoolImpl workerPool;
   @Nullable private WorkerLifecycleManager workerLifecycleManager;
 
   @Override
@@ -64,6 +72,7 @@ public class WorkerModule extends BlazeModule {
     if (workerPool != null) {
       WorkerOptions options = event.getOptionsProvider().getOptions(WorkerOptions.class);
       workerFactory.setReporter(options.workerVerbose ? env.getReporter() : null);
+      workerFactory.setEventBus(env.getEventBus());
       shutdownPool(
           "Clean command is running, shutting down worker pool...",
           /* alwaysLog= */ false,
@@ -78,14 +87,40 @@ public class WorkerModule extends BlazeModule {
    */
   @Subscribe
   public void buildStarting(BuildStartingEvent event) {
-    WorkerOptions options = event.request().getOptions(WorkerOptions.class);
+    WorkerOptions options = checkNotNull(event.request().getOptions(WorkerOptions.class));
     if (workerFactory != null) {
       workerFactory.setReporter(options.workerVerbose ? env.getReporter() : null);
+      workerFactory.setEventBus(env.getEventBus());
     }
     Path workerDir =
         env.getOutputBase().getRelative(env.getRuntime().getProductName() + "-workers");
-
-    WorkerFactory newWorkerFactory = new WorkerFactory(workerDir);
+    BlazeWorkspace workspace = env.getBlazeWorkspace();
+    WorkerSandboxOptions workerSandboxOptions;
+    if (options.sandboxHardening) {
+      SandboxOptions sandboxOptions = event.request().getOptions(SandboxOptions.class);
+      workerSandboxOptions =
+          WorkerSandboxOptions.create(
+              LinuxSandboxUtil.getLinuxSandbox(workspace),
+              sandboxOptions.sandboxFakeHostname,
+              sandboxOptions.sandboxFakeUsername,
+              sandboxOptions.sandboxDebug,
+              ImmutableList.copyOf(sandboxOptions.sandboxTmpfsPath),
+              ImmutableList.copyOf(sandboxOptions.sandboxWritablePath),
+              sandboxOptions.memoryLimitMb,
+              sandboxOptions.getInaccessiblePaths(env.getRuntime().getFileSystem()),
+              ImmutableList.copyOf(sandboxOptions.sandboxAdditionalMounts));
+    } else {
+      workerSandboxOptions = null;
+    }
+    Path trashBase = workerDir.getRelative(AsynchronousTreeDeleter.MOVED_TRASH_DIR);
+    if (treeDeleter == null) {
+      treeDeleter = new AsynchronousTreeDeleter(trashBase);
+      if (trashBase.exists()) {
+        removeStaleTrash(workerDir, trashBase);
+      }
+    }
+    WorkerFactory newWorkerFactory =
+        new WorkerFactory(workerDir, workerSandboxOptions, treeDeleter);
     if (!newWorkerFactory.equals(workerFactory)) {
       if (workerDir.exists()) {
         try {
@@ -120,14 +155,12 @@ public class WorkerModule extends BlazeModule {
           options.workerVerbose);
       workerFactory = newWorkerFactory;
       workerFactory.setReporter(options.workerVerbose ? env.getReporter() : null);
+      workerFactory.setEventBus(env.getEventBus());
     }
 
     WorkerPoolConfig newConfig =
         new WorkerPoolConfig(
-            workerFactory,
-            options.workerMaxInstances,
-            options.workerMaxMultiplexInstances,
-            options.highPriorityWorkers);
+            workerFactory, options.workerMaxInstances, options.workerMaxMultiplexInstances);
 
     // If the config changed compared to the last run, we have to create a new pool.
     if (workerPool == null || !newConfig.equals(workerPool.getWorkerPoolConfig())) {
@@ -138,15 +171,43 @@ public class WorkerModule extends BlazeModule {
     }
 
     if (workerPool == null) {
-      workerPool = new WorkerPool(newConfig);
+      workerPool = new WorkerPoolImpl(newConfig);
       // If workerPool is restarted then we should recreate metrics.
       WorkerMetricsCollector.instance().clear();
     }
 
     // Start collecting after a pool is defined
     workerLifecycleManager = new WorkerLifecycleManager(workerPool, options);
+    workerLifecycleManager.setReporter(env.getReporter());
+    workerLifecycleManager.setEventBus(env.getEventBus());
     workerLifecycleManager.setDaemon(true);
     workerLifecycleManager.start();
+
+    workerPool.setEventBus(env.getEventBus());
+    // Clean doomed workers on the beginning of a build.
+    workerPool.clearDoomedWorkers();
+  }
+
+  private void removeStaleTrash(Path workerDir, Path trashBase) {
+    try {
+      // The AsynchronousTreeDeleter relies on a counter for naming directories that will be
+      // moved out of the way before being deleted asynchronously.
+      // If there is trash on disk from a previous bazel server instance, the dirs will have
+      // names not synced with the counter, therefore we may run the risk of moving a directory
+      // in this server instance to a path of an existing directory. To solve this we rename
+      // the trash directory that was on disk, create a new empty trash directory and delete
+      // the old trash via the AsynchronousTreeDeleter. Before deletion the stale trash will be
+      // moved to a directory named `0` under MOVED_TRASH_DIR.
+      Path staleTrash = trashBase.getParentDirectory().getChild(STALE_TRASH);
+      trashBase.renameTo(staleTrash);
+      trashBase.createDirectory();
+      treeDeleter.deleteTree(staleTrash);
+    } catch (IOException e) {
+      env.getReporter()
+          .handle(
+              Event.error(
+                  String.format("Could not trash dir in '%s': %s", workerDir, e.getMessage())));
+    }
   }
 
   @Override
@@ -163,17 +224,14 @@ public class WorkerModule extends BlazeModule {
             localEnvProvider,
             env.getBlazeWorkspace().getBinTools(),
             env.getLocalResourceManager(),
-            // TODO(buchgr): Replace singleton by a command-scoped RunfilesTreeUpdater
-            RunfilesTreeUpdater.INSTANCE,
+            RunfilesTreeUpdater.forCommandEnvironment(env),
             env.getOptions().getOptions(WorkerOptions.class),
             WorkerMetricsCollector.instance(),
-            env.getXattrProvider(),
             env.getClock());
     ExecutionOptions executionOptions =
         checkNotNull(env.getOptions().getOptions(ExecutionOptions.class));
     registryBuilder.registerStrategy(
-        new WorkerSpawnStrategy(env.getExecRoot(), spawnRunner, executionOptions.verboseFailures),
-        "worker");
+        new WorkerSpawnStrategy(env.getExecRoot(), spawnRunner, executionOptions), "worker");
   }
 
   @Subscribe
@@ -211,6 +269,10 @@ public class WorkerModule extends BlazeModule {
 
     if (this.workerFactory != null) {
       this.workerFactory.setReporter(null);
+      this.workerFactory.setEventBus(null);
+    }
+    if (this.workerPool != null) {
+      this.workerPool.setEventBus(null);
     }
     WorkerMultiplexerManager.afterCommand();
   }

@@ -51,21 +51,19 @@ import com.google.devtools.build.lib.runtime.ProcessWrapper;
 import com.google.devtools.build.lib.server.FailureDetails;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.server.FailureDetails.Spawn.Code;
-import com.google.devtools.build.lib.shell.ExecutionStatistics;
 import com.google.devtools.build.lib.shell.Subprocess;
 import com.google.devtools.build.lib.shell.SubprocessBuilder;
 import com.google.devtools.build.lib.shell.TerminationStatus;
 import com.google.devtools.build.lib.util.NetUtil;
-import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.lib.vfs.XattrProvider;
 import com.google.errorprone.annotations.FormatMethod;
 import com.google.errorprone.annotations.FormatString;
 import java.io.File;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.OutputStream;
+import java.nio.file.Files;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -93,7 +91,6 @@ public class LocalSpawnRunner implements SpawnRunner {
   private final String hostName;
 
   private final LocalExecutionOptions localExecutionOptions;
-  private final XattrProvider xattrProvider;
 
   @Nullable private final ProcessWrapper processWrapper;
 
@@ -109,12 +106,10 @@ public class LocalSpawnRunner implements SpawnRunner {
       LocalEnvProvider localEnvProvider,
       BinTools binTools,
       ProcessWrapper processWrapper,
-      XattrProvider xattrProvider,
       RunfilesTreeUpdater runfilesTreeUpdater) {
     this.execRoot = execRoot;
     this.processWrapper = processWrapper;
     this.localExecutionOptions = Preconditions.checkNotNull(localExecutionOptions);
-    this.xattrProvider = xattrProvider;
     this.hostName = NetUtil.getCachedShortHostName();
     this.resourceManager = resourceManager;
     this.localEnvProvider = localEnvProvider;
@@ -134,14 +129,14 @@ public class LocalSpawnRunner implements SpawnRunner {
     SpawnMetrics.Builder spawnMetrics = SpawnMetrics.Builder.forLocalExec();
     Stopwatch totalTimeStopwatch = Stopwatch.createStarted();
     Stopwatch setupTimeStopwatch = Stopwatch.createStarted();
-    runfilesTreeUpdater.updateRunfilesDirectory(
-        execRoot,
-        spawn.getRunfilesSupplier(),
-        binTools,
-        spawn.getEnvironment(),
-        context.getFileOutErr(),
-        xattrProvider);
-    spawnMetrics.addSetupTime(setupTimeStopwatch.elapsed());
+    try (var s = Profiler.instance().profile("updateRunfiles")) {
+      runfilesTreeUpdater.updateRunfiles(
+          spawn.getRunfilesSupplier(), spawn.getEnvironment(), context.getFileOutErr());
+    }
+    if (Spawns.shouldPrefetchInputsForLocalExecution(spawn)) {
+      context.prefetchInputsAndWait();
+    }
+    spawnMetrics.addSetupTimeInMs((int) setupTimeStopwatch.elapsed().toMillis());
 
     try (SilentCloseable c =
         Profiler.instance()
@@ -157,14 +152,23 @@ public class LocalSpawnRunner implements SpawnRunner {
               context.speculating()
                   ? ResourcePriority.DYNAMIC_STANDALONE
                   : ResourcePriority.LOCAL)) {
-        spawnMetrics.setQueueTime(queueStopwatch.elapsed());
+        spawnMetrics.setQueueTimeInMs((int) queueStopwatch.elapsed().toMillis());
         context.report(SpawnExecutingEvent.create(getName()));
         if (!localExecutionOptions.localLockfreeOutput) {
           // Without local-lockfree, we grab the lock before running the action, so we can't
           // check for failures while taking the lock.
           context.lockOutputFiles(0, "", context.getFileOutErr());
         }
-        return new SubprocessHandler(spawn, context, spawnMetrics, totalTimeStopwatch).run();
+        var result = new SubprocessHandler(spawn, context, spawnMetrics, totalTimeStopwatch).run();
+        if (result.exitCode() != 0
+            && localExecutionOptions.localLockfreeOutput
+            && context.speculating()) {
+          // We aren't going to write any output, but we should either abort the remote branch early
+          // or let it finish if this error can be ignored. If the latter, this call will throw
+          // DynamicInterruptedException.
+          context.lockOutputFiles(result.exitCode(), "", context.getFileOutErr());
+        }
+        return result;
       }
     }
   }
@@ -181,7 +185,7 @@ public class LocalSpawnRunner implements SpawnRunner {
 
   protected Path createActionTemp(Path execRoot) throws IOException {
     return execRoot.getRelative(
-        java.nio.file.Files.createTempDirectory(
+        Files.createTempDirectory(
                 java.nio.file.Paths.get(execRoot.getPathString()), "local-spawn-runner.")
             .getFileName()
             .toString());
@@ -243,7 +247,8 @@ public class LocalSpawnRunner implements SpawnRunner {
               result.exitCode(),
               attempts);
           Thread.sleep(attempts * 1000L);
-          spawnMetrics.addRetryTime(result.exitCode(), rertyStopwatch.elapsed());
+          spawnMetrics.addRetryTimeInMs(
+              result.exitCode(), (int) rertyStopwatch.elapsed().toMillis());
           attempts++;
         }
       }
@@ -321,7 +326,7 @@ public class LocalSpawnRunner implements SpawnRunner {
       logger.atInfo().log("starting local subprocess #%d, argv: %s", id, debugCmdString());
 
       SpawnResult.Builder spawnResultBuilder =
-          new SpawnResult.Builder().setRunnerName(getName()).setExecutorHostname(hostName);
+          getSpawnResultBuilder(context).setExecutorHostname(hostName);
 
       FileOutErr outErr = context.getFileOutErr();
       String actionType = spawn.getResourceOwner().getMnemonic();
@@ -341,7 +346,7 @@ public class LocalSpawnRunner implements SpawnRunner {
                         + localExecutionOptions.allowedLocalAction.regexPattern()
                         + "\n")
                     .getBytes(UTF_8));
-        spawnMetrics.setTotalTime(totalTimeStopwatch.elapsed());
+        spawnMetrics.setTotalTimeInMs((int) totalTimeStopwatch.elapsed().toMillis());
         return spawnResultBuilder
             .setStatus(Status.EXECUTION_DENIED)
             .setExitCode(LOCAL_EXEC_ERROR)
@@ -349,12 +354,6 @@ public class LocalSpawnRunner implements SpawnRunner {
                 makeFailureDetail(LOCAL_EXEC_ERROR, Status.EXECUTION_DENIED, actionType))
             .setSpawnMetrics(spawnMetrics.build())
             .build();
-      }
-
-      if (Spawns.shouldPrefetchInputsForLocalExecution(spawn)) {
-        stepLog(INFO, "prefetching inputs for local execution");
-        setState(State.PREFETCHING_LOCAL_INPUTS);
-        context.prefetchInputsAndWait();
       }
 
       spawnMetrics.setInputFiles(spawn.getInputFiles().memoizedFlattenAndGetSize());
@@ -403,10 +402,8 @@ public class LocalSpawnRunner implements SpawnRunner {
                   .commandLineBuilder(spawn.getArguments())
                   .addExecutionInfo(spawn.getExecutionInfo())
                   .setTimeout(context.getTimeout());
-          if (localExecutionOptions.collectLocalExecutionStatistics) {
-            statisticsPath = tmpDir.getRelative("stats.out");
-            commandLineBuilder.setStatisticsPath(statisticsPath);
-          }
+          statisticsPath = tmpDir.getRelative("stats.out");
+          commandLineBuilder.setStatisticsPath(statisticsPath);
           args = ImmutableList.copyOf(commandLineBuilder.build());
         } else {
           subprocessBuilder.setTimeoutMillis(context.getTimeout().toMillis());
@@ -421,14 +418,14 @@ public class LocalSpawnRunner implements SpawnRunner {
           args = ImmutableList.copyOf(newArgs);
         }
         subprocessBuilder.setArgv(args);
-        spawnMetrics.addSetupTime(setupTimeStopwatch.elapsed());
+        spawnMetrics.addSetupTimeInMs((int) setupTimeStopwatch.elapsed().toMillis());
 
         spawnResultBuilder.setStartTime(Instant.now());
         Stopwatch executionStopwatch = Stopwatch.createStarted();
         TerminationStatus terminationStatus;
         try (SilentCloseable c =
             Profiler.instance()
-                .profile(ProfilerTask.PROCESS_TIME, spawn.getResourceOwner().getMnemonic())) {
+                .profile(ProfilerTask.LOCAL_PROCESS_TIME, spawn.getResourceOwner().getMnemonic())) {
           needCleanup = true;
           Subprocess subprocess = subprocessBuilder.start();
           try {
@@ -454,7 +451,7 @@ public class LocalSpawnRunner implements SpawnRunner {
               .write(
                   ("Action failed to execute: java.io.IOException: " + msg + "\n").getBytes(UTF_8));
           outErr.getErrorStream().flush();
-          spawnMetrics.setTotalTime(totalTimeStopwatch.elapsed());
+          spawnMetrics.setTotalTimeInMs((int) totalTimeStopwatch.elapsed().toMillis());
           return spawnResultBuilder
               .setStatus(Status.EXECUTION_FAILED)
               .setExitCode(LOCAL_EXEC_ERROR)
@@ -466,7 +463,7 @@ public class LocalSpawnRunner implements SpawnRunner {
         setState(State.SUCCESS);
         // TODO(b/62588075): Calculate wall time inside commands instead?
         Duration wallTime = executionStopwatch.elapsed();
-        spawnMetrics.setExecutionWallTime(wallTime);
+        spawnMetrics.setExecutionWallTimeInMs((int) wallTime.toMillis());
 
         boolean wasTimeout =
             terminationStatus.timedOut()
@@ -475,39 +472,17 @@ public class LocalSpawnRunner implements SpawnRunner {
             wasTimeout ? SpawnResult.POSIX_TIMEOUT_EXIT_CODE : terminationStatus.getRawExitCode();
         Status status =
             wasTimeout ? Status.TIMEOUT : (exitCode == 0 ? Status.SUCCESS : Status.NON_ZERO_EXIT);
-        if (exitCode != 0 && localExecutionOptions.localLockfreeOutput && context.speculating()) {
-          // We aren't going to write any output, but we should either abort the remote branch early
-          // or let it finish if this error can be ignored. If the latter, this call will throw
-          // DynamicInterruptedException.
-          context.lockOutputFiles(exitCode, "", outErr);
-        }
-        spawnResultBuilder.setStatus(status).setExitCode(exitCode).setWallTime(wallTime);
+        spawnResultBuilder
+            .setStatus(status)
+            .setExitCode(exitCode)
+            .setWallTimeInMs((int) wallTime.toMillis());
         if (status != Status.SUCCESS) {
           spawnResultBuilder.setFailureDetail(makeFailureDetail(exitCode, status, actionType));
         }
         if (statisticsPath != null) {
-          ExecutionStatistics.getResourceUsage(statisticsPath)
-              .ifPresent(
-                  resourceUsage -> {
-                    spawnResultBuilder.setUserTime(resourceUsage.getUserExecutionTime());
-                    spawnResultBuilder.setSystemTime(resourceUsage.getSystemExecutionTime());
-                    spawnResultBuilder.setNumBlockOutputOperations(
-                        resourceUsage.getBlockOutputOperations());
-                    spawnResultBuilder.setNumBlockInputOperations(
-                        resourceUsage.getBlockInputOperations());
-                    spawnResultBuilder.setNumInvoluntaryContextSwitches(
-                        resourceUsage.getInvoluntaryContextSwitches());
-                    // The memory usage of the largest child process. For Darwin maxrss returns size
-                    // in bytes.
-                    if (OS.getCurrent() == OS.DARWIN) {
-                      spawnResultBuilder.setMemoryInKb(
-                          resourceUsage.getMaximumResidentSetSize() / 1000);
-                    } else {
-                      spawnResultBuilder.setMemoryInKb(resourceUsage.getMaximumResidentSetSize());
-                    }
-                  });
+          spawnResultBuilder.setResourceUsageFromProto(statisticsPath);
         }
-        spawnMetrics.setTotalTime(totalTimeStopwatch.elapsed());
+        spawnMetrics.setTotalTimeInMs((int) totalTimeStopwatch.elapsed().toMillis());
         spawnResultBuilder.setSpawnMetrics(spawnMetrics.build());
         return spawnResultBuilder.build();
       } finally {

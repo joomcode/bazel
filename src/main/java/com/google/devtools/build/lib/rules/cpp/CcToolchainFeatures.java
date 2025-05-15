@@ -30,14 +30,15 @@ import com.google.common.collect.Interner;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
+import com.google.devtools.build.lib.actions.PathMapper;
 import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.Expandable;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.SingleVariables;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.StringChunk;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.StringValueParser;
+import com.google.devtools.build.lib.skyframe.serialization.VisibleForSerialization;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain;
@@ -56,6 +57,7 @@ import java.util.function.Function;
 import javax.annotation.Nullable;
 import net.starlark.java.eval.EvalException;
 import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkValue;
 
 /**
  * Provides access to features supported by a specific toolchain.
@@ -74,7 +76,7 @@ import net.starlark.java.eval.Starlark;
  * them from build variables).
  */
 @Immutable
-public class CcToolchainFeatures {
+public class CcToolchainFeatures implements StarlarkValue {
 
   /**
    * Thrown when a flag value cannot be expanded under a set of build variables.
@@ -121,11 +123,12 @@ public class CcToolchainFeatures {
     public void expand(
         CcToolchainVariables variables,
         @Nullable ArtifactExpander expander,
+        PathMapper pathMapper,
         List<String> commandLine)
         throws ExpansionException {
       StringBuilder flag = new StringBuilder();
       for (StringChunk chunk : chunks) {
-        flag.append(chunk.expand(variables));
+        flag.append(chunk.expand(variables, pathMapper));
       }
       commandLine.add(flag.toString().intern());
     }
@@ -169,9 +172,10 @@ public class CcToolchainFeatures {
       public void expand(
           CcToolchainVariables variables,
           @Nullable ArtifactExpander artifactExpander,
+          PathMapper pathMapper,
           List<String> commandLine)
           throws ExpansionException {
-        commandLine.add(chunk.expand(variables));
+        commandLine.add(chunk.expand(variables, pathMapper));
       }
 
       @Override
@@ -202,16 +206,22 @@ public class CcToolchainFeatures {
   public static class EnvEntry {
     private final String key;
     private final ImmutableList<StringChunk> valueChunks;
+    private final ImmutableSet<String> expandIfAllAvailable;
 
     private EnvEntry(CToolchain.EnvEntry envEntry) throws EvalException {
       this.key = envEntry.getKey();
       StringValueParser parser = new StringValueParser(envEntry.getValue());
       this.valueChunks = parser.getChunks();
+      this.expandIfAllAvailable = ImmutableSet.copyOf(envEntry.getExpandIfAllAvailableList());
     }
 
-    EnvEntry(String key, ImmutableList<StringChunk> valueChunks) {
+    EnvEntry(
+        String key,
+        ImmutableList<StringChunk> valueChunks,
+        ImmutableSet<String> expandIfAllAvailable) {
       this.key = key;
       this.valueChunks = valueChunks;
+      this.expandIfAllAvailable = expandIfAllAvailable;
     }
 
     String getKey() {
@@ -226,16 +236,34 @@ public class CcToolchainFeatures {
                   .collect(ImmutableList.toImmutableList()));
     }
 
+    ImmutableSet<String> getExpandIfAllAvailable() {
+      return expandIfAllAvailable;
+    }
+
+    private boolean canBeExpanded(CcToolchainVariables variables) {
+      for (String variable : expandIfAllAvailable) {
+        if (!variables.isAvailable(variable)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
     /**
      * Adds the key/value pair this object represents to the given map of environment variables. The
      * value of the entry is expanded with the given {@code variables}.
      */
     public void addEnvEntry(
-        CcToolchainVariables variables, ImmutableMap.Builder<String, String> envBuilder)
+        CcToolchainVariables variables,
+        ImmutableMap.Builder<String, String> envBuilder,
+        PathMapper pathMapper)
         throws ExpansionException {
+      if (!canBeExpanded(variables)) {
+        return;
+      }
       StringBuilder value = new StringBuilder();
       for (StringChunk chunk : valueChunks) {
-        value.append(chunk.expand(variables));
+        value.append(chunk.expand(variables, pathMapper));
       }
       envBuilder.put(key, value.toString());
     }
@@ -349,29 +377,30 @@ public class CcToolchainFeatures {
     public void expand(
         CcToolchainVariables variables,
         @Nullable ArtifactExpander expander,
+        PathMapper pathMapper,
         final List<String> commandLine)
         throws ExpansionException {
-      if (!canBeExpanded(variables, expander)) {
+      if (!canBeExpanded(variables, expander, pathMapper)) {
         return;
       }
       if (iterateOverVariable != null) {
         for (CcToolchainVariables.VariableValue variableValue :
-            variables.getSequenceVariable(iterateOverVariable, expander)) {
+            variables.getSequenceVariable(iterateOverVariable, expander, pathMapper)) {
           CcToolchainVariables nestedVariables =
               new SingleVariables(variables, iterateOverVariable, variableValue);
           for (Expandable expandable : expandables) {
-            expandable.expand(nestedVariables, expander, commandLine);
+            expandable.expand(nestedVariables, expander, pathMapper, commandLine);
           }
         }
       } else {
         for (Expandable expandable : expandables) {
-          expandable.expand(variables, expander, commandLine);
+          expandable.expand(variables, expander, pathMapper, commandLine);
         }
       }
     }
 
     private boolean canBeExpanded(
-        CcToolchainVariables variables, @Nullable ArtifactExpander expander)
+        CcToolchainVariables variables, @Nullable ArtifactExpander expander, PathMapper pathMapper)
         throws ExpansionException {
       for (String variable : expandIfAllAvailable) {
         if (!variables.isAvailable(variable, expander)) {
@@ -397,7 +426,7 @@ public class CcToolchainFeatures {
           && (!variables.isAvailable(expandIfEqual.variable, expander)
               || !variables
                   .getVariable(expandIfEqual.variable)
-                  .getStringValue(expandIfEqual.variable)
+                  .getStringValue(expandIfEqual.variable, pathMapper)
                   .equals(expandIfEqual.value))) {
         return false;
       }
@@ -422,9 +451,10 @@ public class CcToolchainFeatures {
     private void expandCommandLine(
         CcToolchainVariables variables,
         @Nullable ArtifactExpander expander,
+        PathMapper pathMapper,
         final List<String> commandLine)
         throws ExpansionException {
-      expand(variables, expander, commandLine);
+      expand(variables, expander, pathMapper, commandLine);
     }
 
     @Override
@@ -545,6 +575,7 @@ public class CcToolchainFeatures {
         CcToolchainVariables variables,
         Set<String> enabledFeatureNames,
         @Nullable ArtifactExpander expander,
+        PathMapper pathMapper,
         List<String> commandLine)
         throws ExpansionException {
       for (String variable : expandIfAllAvailable) {
@@ -559,7 +590,7 @@ public class CcToolchainFeatures {
         return;
       }
       for (FlagGroup flagGroup : flagGroups) {
-        flagGroup.expandCommandLine(variables, expander, commandLine);
+        flagGroup.expandCommandLine(variables, expander, pathMapper, commandLine);
       }
     }
 
@@ -693,6 +724,7 @@ public class CcToolchainFeatures {
     private void expandEnvironment(
         String action,
         CcToolchainVariables variables,
+        PathMapper pathMapper,
         Set<String> enabledFeatureNames,
         ImmutableMap.Builder<String, String> envBuilder)
         throws ExpansionException {
@@ -703,7 +735,7 @@ public class CcToolchainFeatures {
         return;
       }
       for (EnvEntry envEntry : envEntries) {
-        envEntry.addEnvEntry(variables, envBuilder);
+        envEntry.addEnvEntry(variables, envBuilder, pathMapper);
       }
     }
 
@@ -821,11 +853,12 @@ public class CcToolchainFeatures {
     private void expandEnvironment(
         String action,
         CcToolchainVariables variables,
+        PathMapper pathMapper,
         Set<String> enabledFeatureNames,
         ImmutableMap.Builder<String, String> envBuilder)
         throws ExpansionException {
       for (EnvSet envSet : envSets) {
-        envSet.expandEnvironment(action, variables, enabledFeatureNames, envBuilder);
+        envSet.expandEnvironment(action, variables, pathMapper, enabledFeatureNames, envBuilder);
       }
     }
 
@@ -835,10 +868,12 @@ public class CcToolchainFeatures {
         CcToolchainVariables variables,
         Set<String> enabledFeatureNames,
         @Nullable ArtifactExpander expander,
+        PathMapper pathMapper,
         List<String> commandLine)
         throws ExpansionException {
       for (FlagSet flagSet : flagSets) {
-        flagSet.expandCommandLine(action, variables, enabledFeatureNames, expander, commandLine);
+        flagSet.expandCommandLine(
+            action, variables, enabledFeatureNames, expander, pathMapper, commandLine);
       }
     }
 
@@ -1137,11 +1172,12 @@ public class CcToolchainFeatures {
         CcToolchainVariables variables,
         Set<String> enabledFeatureNames,
         @Nullable ArtifactExpander expander,
+        PathMapper pathMapper,
         List<String> commandLine)
         throws ExpansionException {
       for (FlagSet flagSet : flagSets) {
         flagSet.expandCommandLine(
-            actionName, variables, enabledFeatureNames, expander, commandLine);
+            actionName, variables, enabledFeatureNames, expander, pathMapper, commandLine);
       }
     }
 
@@ -1352,59 +1388,74 @@ public class CcToolchainFeatures {
     /** @return the command line for the given {@code action}. */
     public List<String> getCommandLine(String action, CcToolchainVariables variables)
         throws ExpansionException {
-      return getCommandLine(action, variables, /* expander= */ null);
+      return getCommandLine(action, variables, /* expander= */ null, PathMapper.NOOP);
     }
 
     public List<String> getCommandLine(
-        String action, CcToolchainVariables variables, @Nullable ArtifactExpander expander)
+        String action,
+        CcToolchainVariables variables,
+        @Nullable ArtifactExpander expander,
+        PathMapper pathMapper)
         throws ExpansionException {
       List<String> commandLine = new ArrayList<>();
       if (actionIsConfigured(action)) {
         actionConfigByActionName
             .get(action)
-            .expandCommandLine(variables, enabledFeatureNames, expander, commandLine);
+            .expandCommandLine(variables, enabledFeatureNames, expander, pathMapper, commandLine);
       }
 
       for (Feature feature : enabledFeatures) {
-        feature.expandCommandLine(action, variables, enabledFeatureNames, expander, commandLine);
+        feature.expandCommandLine(
+            action, variables, enabledFeatureNames, expander, pathMapper, commandLine);
       }
 
       return commandLine;
     }
 
-    /** @return the flags expanded for the given {@code action} in per-feature buckets. */
+    /**
+     * @return the flags expanded for the given {@code action} in per-feature buckets.
+     */
     public ImmutableList<Pair<String, List<String>>> getPerFeatureExpansions(
-        String action, CcToolchainVariables variables) throws ExpansionException {
-      return getPerFeatureExpansions(action, variables, null);
+        String action, CcToolchainVariables variables, PathMapper pathMapper)
+        throws ExpansionException {
+      return getPerFeatureExpansions(action, variables, null, pathMapper);
     }
 
     public ImmutableList<Pair<String, List<String>>> getPerFeatureExpansions(
-        String action, CcToolchainVariables variables, @Nullable ArtifactExpander expander)
+        String action,
+        CcToolchainVariables variables,
+        @Nullable ArtifactExpander expander,
+        PathMapper pathMapper)
         throws ExpansionException {
       ImmutableList.Builder<Pair<String, List<String>>> perFeatureExpansions =
           ImmutableList.builder();
       if (actionIsConfigured(action)) {
         List<String> commandLine = new ArrayList<>();
         ActionConfig actionConfig = actionConfigByActionName.get(action);
-        actionConfig.expandCommandLine(variables, enabledFeatureNames, expander, commandLine);
+        actionConfig.expandCommandLine(
+            variables, enabledFeatureNames, expander, pathMapper, commandLine);
         perFeatureExpansions.add(Pair.of(actionConfig.getName(), commandLine));
       }
 
       for (Feature feature : enabledFeatures) {
         List<String> commandLine = new ArrayList<>();
-        feature.expandCommandLine(action, variables, enabledFeatureNames, expander, commandLine);
+        feature.expandCommandLine(
+            action, variables, enabledFeatureNames, expander, pathMapper, commandLine);
         perFeatureExpansions.add(Pair.of(feature.getName(), commandLine));
       }
 
       return perFeatureExpansions.build();
     }
 
-    /** @return the environment variables (key/value pairs) for the given {@code action}. */
+    /**
+     * @return the environment variables (key/value pairs) for the given {@code action}.
+     */
     public ImmutableMap<String, String> getEnvironmentVariables(
-        String action, CcToolchainVariables variables) throws ExpansionException {
+        String action, CcToolchainVariables variables, PathMapper pathMapper)
+        throws ExpansionException {
       ImmutableMap.Builder<String, String> envBuilder = ImmutableMap.builder();
       for (Feature feature : enabledFeatures) {
-        feature.expandEnvironment(action, variables, enabledFeatureNames, envBuilder);
+        feature.expandEnvironment(action, variables, pathMapper, enabledFeatureNames, envBuilder);
       }
       return envBuilder.buildOrThrow();
     }

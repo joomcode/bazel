@@ -17,11 +17,11 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.testutil.TestConstants.PLATFORM_LABEL;
+import static com.google.devtools.build.lib.testutil.TestConstants.PLATFORM_LABEL_ALIAS;
 import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.analysis.config.BuildConfigurationValue;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.BuildOptionsView;
@@ -53,7 +53,6 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.Set;
-import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -63,7 +62,7 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
   // Also filter out platform dependencies.
   @Override
   protected String getDependencyCorrection() {
-    return " - deps(" + PLATFORM_LABEL + ")";
+    return " - deps(" + PLATFORM_LABEL_ALIAS + ")";
   }
 
   static final String DEFAULT_UNIVERSE = "DEFAULT_UNIVERSE";
@@ -148,20 +147,22 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
     return false;
   }
 
-  @After
-  public void cleanUpHelper() {
-    getHelper().cleanUp();
-    helper = null;
-  }
-
   @Override
   @Test
-  public void testTargetLiteralWithMissingTargets() throws Exception {
+  public void testTargetLiteralWithMissingTargets() {
     getHelper().turnOffFailFast();
     TargetParsingException e =
         assertThrows(TargetParsingException.class, super::testTargetLiteralWithMissingTargets);
-    checkResultOfTargetLiteralWithMissingTargets(
-        e.getMessage(), e.getDetailedExitCode().getFailureDetail());
+    assertThat(e)
+        .hasMessageThat()
+        .matches(
+            TestUtils.createMissingTargetAssertionString(
+                /* target= */ "b",
+                /* packageStr= */ "a",
+                helper.getRootDirectory().getPathString(),
+                ""));
+    assertThat(e.getDetailedExitCode().getFailureDetail().getPackageLoading().getCode())
+        .isEqualTo(FailureDetails.PackageLoading.Code.TARGET_MISSING);
   }
 
   @Override
@@ -183,13 +184,13 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
                 "implicit_deps_rule",
                 attr("explicit", LABEL).allowedFileTypes(FileTypeSet.ANY_FILE),
                 attr("explicit_with_default", LABEL)
-                    .value(Label.parseAbsoluteUnchecked("//test:explicit_with_default"))
+                    .value(Label.parseCanonicalUnchecked("//test:explicit_with_default"))
                     .allowedFileTypes(FileTypeSet.ANY_FILE),
-                attr("$implicit", LABEL).value(Label.parseAbsoluteUnchecked("//test:implicit")),
+                attr("$implicit", LABEL).value(Label.parseCanonicalUnchecked("//test:implicit")),
                 attr(":latebound", LABEL)
                     .value(
                         Attribute.LateBoundDefault.fromConstantForTesting(
-                            Label.parseAbsoluteUnchecked("//test:latebound"))));
+                            Label.parseCanonicalUnchecked("//test:latebound"))));
     helper.useRuleClassProvider(setRuleClassProviders(ruleWithImplicitDeps).build());
 
     writeFile(
@@ -228,7 +229,7 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
                 (builder, env) ->
                     builder.addToolchainTypes(
                         ToolchainTypeRequirement.create(
-                            Label.parseAbsoluteUnchecked("//test:toolchain_type"))));
+                            Label.parseCanonicalUnchecked("//test:toolchain_type"))));
     helper.useRuleClassProvider(setRuleClassProviders(ruleWithImplicitDeps).build());
 
     writeFile(
@@ -259,27 +260,39 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
 
     // Check for implicit toolchain dependencies
     assertThat(evalToListOfStrings("deps(//test:my_rule)"))
-        .containsAtLeastElementsIn(
-            evalToListOfStrings(explicits + " + " + implicits + " + " + PLATFORM_LABEL));
+        .containsAtLeast(explicits, implicits, evalToString(PLATFORM_LABEL));
 
     helper.setQuerySettings(Setting.NO_IMPLICIT_DEPS);
     ImmutableList<String> filteredDeps = evalToListOfStrings("deps(//test:my_rule)");
-    assertThat(filteredDeps).containsAtLeastElementsIn(evalToListOfStrings(explicits));
-    assertThat(filteredDeps).containsNoneIn(evalToListOfStrings(implicits));
+    assertThat(filteredDeps).contains(explicits);
+    assertThat(filteredDeps).doesNotContain(implicits);
   }
 
-  @Test
-  public void testNoImplicitDeps_starlark_toolchains() throws Exception {
+  private void writeSimpleToolchain() throws Exception {
     writeFile(
-        "test/toolchain.bzl",
+        "test/toolchain_def.bzl",
         "def _impl(ctx):",
-        "  toolchain = platform_common.ToolchainInfo()",
-        "  return [toolchain]",
+        "    return [platform_common.ToolchainInfo()]",
         "test_toolchain = rule(",
         "    implementation = _impl,",
         ")");
     writeFile(
-        "test/rule.bzl",
+        "test/BUILD",
+        "load('//test:toolchain_def.bzl', 'test_toolchain')",
+        "toolchain_type(name = 'toolchain_type')",
+        "toolchain(",
+        "  name = 'toolchain',",
+        "  toolchain_type = '//test:toolchain_type',",
+        "  toolchain = ':toolchain_impl'",
+        ")",
+        "test_toolchain(name = 'toolchain_impl')");
+  }
+
+  @Test
+  public void testNoImplicitDeps_starlark_toolchains() throws Exception {
+    writeSimpleToolchain();
+    writeFile(
+        "test/rule/rule.bzl",
         "def _impl(ctx):",
         "  return []",
         "implicit_toolchain_deps_rule = rule(",
@@ -287,32 +300,24 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
         "    toolchains = ['//test:toolchain_type']",
         ")");
     writeFile(
-        "test/BUILD",
-        "load(':toolchain.bzl', 'test_toolchain')",
+        "test/rule/BUILD",
         "load(':rule.bzl', 'implicit_toolchain_deps_rule')",
         "implicit_toolchain_deps_rule(",
         "    name = 'my_rule',",
-        ")",
-        "toolchain_type(name = 'toolchain_type')",
-        "toolchain(",
-        "    name = 'toolchain',",
-        "    toolchain_type = ':toolchain_type',",
-        "    toolchain = ':toolchain_impl',",
-        ")",
-        "test_toolchain(name = 'toolchain_impl')");
+        ")");
     ((PostAnalysisQueryHelper<T>) helper).useConfiguration("--extra_toolchains=//test:toolchain");
 
     String implicits = "//test:toolchain_impl";
-    String explicits = "//test:my_rule";
+    String explicits = "//test/rule:my_rule";
 
     // Check for implicit toolchain dependencies
-    assertThat(evalToListOfStrings("deps(//test:my_rule)"))
-        .containsAtLeastElementsIn(evalToListOfStrings(explicits + " + " + implicits));
+    assertThat(evalToListOfStrings("deps(//test/rule:my_rule)"))
+        .containsAtLeast(explicits, implicits);
 
     helper.setQuerySettings(Setting.NO_IMPLICIT_DEPS);
-    ImmutableList<String> filteredDeps = evalToListOfStrings("deps(//test:my_rule)");
-    assertThat(filteredDeps).containsAtLeastElementsIn(evalToListOfStrings(explicits));
-    assertThat(filteredDeps).containsNoneIn(evalToListOfStrings(implicits));
+    ImmutableList<String> filteredDeps = evalToListOfStrings("deps(//test/rule:my_rule)");
+    assertThat(filteredDeps).contains(explicits);
+    assertThat(filteredDeps).doesNotContain(implicits);
   }
 
   @Test
@@ -366,13 +371,12 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
 
     // Check for implicit toolchain dependencies
     assertThat(evalToListOfStrings("deps(//test:my_rule)"))
-        .containsAtLeastElementsIn(
-            evalToListOfStrings(explicits + " + " + implicits + " + " + PLATFORM_LABEL));
+        .containsAtLeast(explicits, implicits, evalToString(PLATFORM_LABEL));
 
     helper.setQuerySettings(Setting.NO_IMPLICIT_DEPS);
     ImmutableList<String> filteredDeps = evalToListOfStrings("deps(//test:my_rule)");
-    assertThat(filteredDeps).containsAtLeastElementsIn(evalToListOfStrings(explicits));
-    assertThat(filteredDeps).containsNoneIn(evalToListOfStrings(implicits));
+    assertThat(filteredDeps).contains(explicits);
+    assertThat(filteredDeps).doesNotContain(implicits);
   }
 
   // Regression test for b/148550864
@@ -400,6 +404,75 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
     assertThat(evalToListOfStrings("deps(//test:my_rule)")).containsExactly("//test:my_rule");
   }
 
+  //  Regression test for b/275502129.
+  @Test
+  public void testNoImplicitDepsFromAutoExecGroups_autoExecGroupsEnabled() throws Exception {
+    writeSimpleToolchain();
+    writeFile(
+        "test/aeg/defs.bzl",
+        "def _impl(ctx):",
+        "  return []",
+        "custom_rule = rule(",
+        "  implementation = _impl,",
+        "  toolchains = ['//test:toolchain_type'],",
+        ")");
+    writeFile(
+        "test/aeg/BUILD",
+        "load('//test/aeg:defs.bzl', 'custom_rule')",
+        "custom_rule(name = 'custom_rule_name')");
+    ((PostAnalysisQueryHelper<T>) helper)
+        .useConfiguration("--incompatible_auto_exec_groups", "--extra_toolchains=//test:all");
+
+    String implicits = "//test:toolchain_impl";
+    String explicits = "//test/aeg:custom_rule_name";
+
+    // Check for implicit toolchain dependencies
+    assertThat(evalToListOfStrings("deps(//test/aeg:custom_rule_name)"))
+        .containsAtLeast(explicits, implicits);
+
+    helper.setQuerySettings(Setting.NO_IMPLICIT_DEPS);
+    ImmutableList<String> filteredDeps = evalToListOfStrings("deps(//test/aeg:custom_rule_name)");
+    assertThat(filteredDeps).contains(explicits);
+    assertThat(filteredDeps).doesNotContain(implicits);
+  }
+
+  //  Regression test for b/275502129.
+  @Test
+  public void testNoImplicitDepsFromCustomExecGroups_autoExecGroupsEnabled() throws Exception {
+    writeSimpleToolchain();
+    writeFile(
+        "test/aeg/defs.bzl",
+        "def _impl(ctx):",
+        "  return []",
+        "custom_rule = rule(",
+        "  implementation = _impl,",
+        "  exec_groups = {",
+        "    'custom_exec_group': exec_group(",
+        "      toolchains = ['//test:toolchain_type'],",
+        "    ),",
+        "  },",
+        ")");
+    writeFile(
+        "test/aeg/BUILD",
+        "load('//test/aeg:defs.bzl', 'custom_rule')",
+        "custom_rule(name = 'custom_rule_name')");
+    ((PostAnalysisQueryHelper<T>) helper)
+        .useConfiguration("--incompatible_auto_exec_groups", "--extra_toolchains=//test:all");
+
+    String implicits = "//test:toolchain_impl";
+    String explicits = "//test/aeg:custom_rule_name";
+
+    // Check for implicit toolchain dependencies
+    assertThat(evalToListOfStrings("deps(//test/aeg:custom_rule_name)"))
+        .containsAtLeast(explicits, implicits);
+
+    helper.setQuerySettings(Setting.NO_IMPLICIT_DEPS);
+    ImmutableList<String> filteredDeps = evalToListOfStrings("deps(//test/aeg:custom_rule_name)");
+    assertThat(filteredDeps).contains(explicits);
+    assertThat(filteredDeps).doesNotContain(implicits);
+  }
+
+  @Override
   @Test
   public void testNoImplicitDeps_computedDefault() throws Exception {
     MockRule computedDefaultRule =
@@ -415,7 +488,7 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
                           public Object getDefault(AttributeMap rule) {
                             return rule.get("conspiracy", Type.STRING)
                                     .equals("space jam was a documentary")
-                                ? Label.parseAbsoluteUnchecked("//test:foo")
+                                ? Label.parseCanonicalUnchecked("//test:foo")
                                 : null;
                           }
                         }));
@@ -483,7 +556,8 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
         () ->
             MockRule.define(
                 "transitioned_rule",
-                (builder, env) -> builder.cfg(new FooPatchTransition("SET BY PATCH")).build());
+                (builder, env) ->
+                    builder.cfg(unused -> new FooPatchTransition("SET BY PATCH")).build());
 
     MockRule untransitionedRule = () -> MockRule.define("untransitioned_rule");
 
@@ -515,7 +589,7 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
                 "rule_with_transition_and_dep",
                 (builder, env) ->
                     builder
-                        .cfg(new FooPatchTransition("SET BY PATCH"))
+                        .cfg(unused -> new FooPatchTransition("SET BY PATCH"))
                         .addAttribute(
                             attr("dep", LABEL).allowedFileTypes(FileTypeSet.ANY_FILE).build())
                         .build());
@@ -532,8 +606,8 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
 
     helper.setUniverseScope("//test:*");
 
-    assertThat(getConfiguration(Iterables.getOnlyElement(eval("//test:dep"))))
-        .isNotEqualTo(getConfiguration(Iterables.getOnlyElement(eval("//test:top-level"))));
+    // `//test:dep` has two configurations.
+    assertThat(eval("//test:dep")).hasSize(2);
   }
 
   @Test
@@ -558,6 +632,9 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
         .isEqualTo(FailureDetails.TargetPatterns.Code.CANNOT_DETERMINE_TARGET_FROM_FILENAME);
   }
 
+  @Test
+  public void labelPointsToMultipleConfiguredTargets() throws Exception {}
+
   private void writeSimpleTarget() throws Exception {
     MockRule simpleRule =
         () ->
@@ -566,6 +643,27 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
     helper.useRuleClassProvider(setRuleClassProviders(simpleRule).build());
 
     writeFile("test/BUILD", "simple_rule(name = 'target')");
+  }
+
+  @Test
+  public void aliasMinus() throws Exception {
+    MockRule simpleRule =
+        () ->
+            MockRule.define(
+                "simple_rule", attr("dep", LABEL).allowedFileTypes(FileTypeSet.ANY_FILE));
+    helper.useRuleClassProvider(setRuleClassProviders(simpleRule).build());
+
+    writeFile(
+        "p/BUILD",
+        "simple_rule(name = 'dep')",
+        "alias(name = 'alias', actual = 'dep')",
+        "simple_rule(name = 'user', dep = ':alias')");
+    assertThat(evalToString("deps(//p:alias) - deps(//p:dep)")).isEqualTo("//p:alias");
+    // The following assertion fails if the expression `//p:alias` doesn't represent two configured
+    // targets -- one configured without TestOptions (trimmed) and the other configured with one
+    // (untrimmed). The untrimmed configured target is from the top-level expression, whereas the
+    // trimmed one is from `//p:user`'s dependency.
+    assertThat(evalToString("deps(//p:user) - deps(//p:alias)")).isEqualTo("//p:user");
   }
 
   @Test
@@ -607,18 +705,6 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
   @Override
   @Test
   public void testEqualityOfOrderedThreadSafeImmutableSet() {}
-
-  @Override
-  public void testDefaultCopts() {}
-
-  @Override
-  public void testHdrsCheck() {}
-
-  @Override
-  public void testFilesetPackageDeps() {}
-
-  @Override
-  public void testRegressionBug1686119() {}
 
   // The actual crosstool-related targets depended on are not the nominal crosstool label the test
   // expects.
@@ -773,6 +859,9 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
 
   @Override
   public void bzlPackageBadDueToBrokenSyntax() {}
+
+  @Override
+  public void testBuildfilesContainingScl() {}
 
   @Override
   public void buildfilesBazel() {}

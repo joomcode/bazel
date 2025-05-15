@@ -30,9 +30,15 @@ source "$(rlocation "io_bazel/src/test/shell/integration_test_setup.sh")" \
 
 case "$(uname -s | tr [:upper:] [:lower:])" in
 msys*|mingw*|cygwin*)
+  declare -r is_macos=false
   declare -r is_windows=true
   ;;
+darwin)
+  declare -r is_macos=true
+  declare -r is_windows=false
+  ;;
 *)
+  declare -r is_macos=false
   declare -r is_windows=false
   ;;
 esac
@@ -143,7 +149,7 @@ EOF
   assert_not_contains "echo unused" output
 }
 
-function test_basic_aquery_textproto() {
+function test_basic_aquery_proto() {
   local pkg="${FUNCNAME[0]}"
   mkdir -p "$pkg" || fail "mkdir -p $pkg"
   cat > "$pkg/BUILD" <<'EOF'
@@ -155,6 +161,9 @@ genrule(
 )
 EOF
   bazel aquery --output=proto "//$pkg:bar" \
+    || fail "Expected success"
+
+  bazel aquery --output=streamed_proto "//$pkg:bar" \
     || fail "Expected success"
 
   bazel aquery --output=textproto "//$pkg:bar" > output 2> "$TEST_log" \
@@ -938,6 +947,7 @@ EOF
   # Darwin and Windows only produce 1 CppCompileActionTemplate with PIC,
   # while Linux has both PIC and non-PIC CppCompileActionTemplates
   bazel aquery -c opt --output=text ${QUERY} > output 2> "$TEST_log" \
+    --features=-prefer_pic_for_opt_binaries \
     || fail "Expected success"
   cat output >> "$TEST_log"
   if (is_darwin || $is_windows); then
@@ -1205,14 +1215,14 @@ EOF
 
   bazel clean
 
-  bazel aquery --output=textproto --skyframe_state > output 2> "$TEST_log" \
+  bazel aquery --noenable_bzlmod --output=textproto --skyframe_state > output 2> "$TEST_log" \
     || fail "Expected success"
   cat output >> "$TEST_log"
   assert_not_contains "actions" output
 
-  bazel build --nobuild "//$pkg:foo"
+  bazel build --noenable_bzlmod --nobuild "//$pkg:foo"
 
-  bazel aquery --output=textproto --skyframe_state > output 2> "$TEST_log" \
+  bazel aquery --noenable_bzlmod --output=textproto --skyframe_state > output 2> "$TEST_log" \
     || fail "Expected success"
   cat output >> "$TEST_log"
 
@@ -1241,9 +1251,9 @@ EOF
   QUERY="inputs('.*matching_in.java', outputs('.*matching_out', mnemonic('Genrule')))"
 
   bazel clean
-  bazel build --nobuild "//$pkg:foo"
+  bazel build --noenable_bzlmod --nobuild "//$pkg:foo"
 
-  bazel aquery --output=textproto --skyframe_state ${QUERY} > output 2> "$TEST_log" \
+  bazel aquery --noenable_bzlmod --output=textproto --skyframe_state ${QUERY} > output 2> "$TEST_log" \
     || fail "Expected success"
   cat output >> "$TEST_log"
 
@@ -1263,14 +1273,14 @@ EOF
 
   bazel clean
 
-  bazel aquery --output=textproto --skyframe_state > output 2> "$TEST_log" \
+  bazel aquery --noenable_bzlmod --output=textproto --skyframe_state > output 2> "$TEST_log" \
     || fail "Expected success"
   cat output >> "$TEST_log"
   assert_not_contains "actions" output
 
-  bazel build --nobuild "//$pkg:foo"
+  bazel build --noenable_bzlmod --nobuild "//$pkg:foo"
 
-  bazel aquery --output=textproto --skyframe_state > output 2> "$TEST_log" \
+  bazel aquery --noenable_bzlmod --output=textproto --skyframe_state > output 2> "$TEST_log" \
     || fail "Expected success"
   cat output >> "$TEST_log"
 
@@ -1294,14 +1304,14 @@ EOF
 
   bazel clean
 
-  bazel aquery --output=jsonproto --skyframe_state > output 2> "$TEST_log" \
+  bazel aquery --noenable_bzlmod --output=jsonproto --skyframe_state > output 2> "$TEST_log" \
     || fail "Expected success"
   cat output >> "$TEST_log"
   assert_not_contains "actions" output
 
-  bazel build --nobuild "//$pkg:foo"
+  bazel build --noenable_bzlmod --nobuild "//$pkg:foo"
 
-  bazel aquery --output=jsonproto --skyframe_state > output 2> "$TEST_log" \
+  bazel aquery --noenable_bzlmod --output=jsonproto --skyframe_state > output 2> "$TEST_log" \
     || fail "Expected success"
   cat output >> "$TEST_log"
 
@@ -1322,7 +1332,7 @@ EOF
 
   bazel clean
 
-  bazel aquery --output=text --skyframe_state &> "$TEST_log" \
+  bazel aquery --noenable_bzlmod --output=text --skyframe_state &> "$TEST_log" \
     && fail "Expected failure"
   expect_log "--skyframe_state must be used with --output=proto\|textproto\|jsonproto. Invalid aquery output format: text"
 }
@@ -1420,6 +1430,8 @@ function test_aquery_include_template_substitution_for_template_expand_of_py_bin
   local pkg="${FUNCNAME[0]}"
   mkdir -p "$pkg" || fail "mkdir -p $pkg"
   cat > "$pkg/BUILD" <<'EOF'
+load("@rules_python//python:py_binary.bzl", "py_binary")
+
 py_binary(
     name='foo',
     srcs=['foo.py']
@@ -1448,7 +1460,7 @@ function test_aquery_include_template_substitution_for_template_expand_action() 
   mkdir -p "$pkg" || fail "mkdir -p $pkg"
 
   cat > "$pkg/template.txt" <<'EOF'
-The token should be substituted: {TOKEN1}
+The token: {TOKEN1}
 EOF
 
   cat > "$pkg/test.bzl" <<'EOF'
@@ -1487,14 +1499,81 @@ EOF
     || fail "Expected success"
   cat output >> "$TEST_log"
 
-  assert_contains "Template: ARTIFACT: $pkg/template.txt" output
+  assert_contains "Template: The token: {TOKEN1}" output
   assert_contains "{{TOKEN1}: 123456}" output
 
   bazel aquery --output=jsonproto ${QUERY} > output 2> "$TEST_log" \
     || fail "Expected success"
 
-  assert_contains "\"templateContent\": \"ARTIFACT: $pkg/template.txt\"" output
+  assert_contains "\"templateContent\": \"The token" output
   assert_contains "\"key\": \"{TOKEN1}\"" output
+  assert_contains "\"value\": \"123456\"" output
+}
+
+# Cre: @keith https://github.com/bazelbuild/bazel/pull/17682
+function test_aquery_multiple_expand_templates() {
+  local pkg="${FUNCNAME[0]}"
+  mkdir -p "$pkg" || fail "mkdir -p $pkg"
+
+  cat > "$pkg/template.txt" <<'EOF'
+The token: {TOKEN1}
+EOF
+
+  cat > "$pkg/test.bzl" <<EOF
+def _impl(ctx):
+    template1 = ctx.actions.declare_file("first.txt")
+    ctx.actions.expand_template(
+        template = ctx.file._template,
+        output = template1,
+        substitutions = {
+            "{TOKEN1}": "{TOKEN2}",
+        },
+    )
+    template2 = ctx.actions.declare_file("second.txt")
+    ctx.actions.expand_template(
+        template = template1,
+        output = template2,
+        substitutions = {
+            "{TOKEN2}": "123456",
+        },
+    )
+    return [DefaultInfo(files = depset([template2]))]
+test_template = rule(
+    _impl,
+    attrs = {
+        "_template": attr.label(
+            default = Label("//$pkg:template.txt"),
+            allow_single_file = True,
+        ),
+    },
+)
+EOF
+
+  cat > "$pkg/BUILD" <<'EOF'
+load('test.bzl', 'test_template')
+test_template(name='foo')
+EOF
+
+  # aquery returns template content and substitutions of TemplateExpand actions.
+  QUERY="//$pkg:foo"
+
+  bazel aquery --output=text ${QUERY} > output 2> "$TEST_log" \
+    || fail "Expected success"
+  cat output >> "$TEST_log"
+
+  assert_contains "Template: The token: {TOKEN1}" output
+  assert_contains "{{TOKEN1}: {TOKEN2}}" output
+  assert_contains "Template: ARTIFACT:.*$pkg/first.txt" output
+  assert_contains "{{TOKEN2}: 123456}" output
+
+  bazel aquery --output=jsonproto ${QUERY} > output 2> "$TEST_log" \
+    || fail "Expected success"
+
+  assert_contains "\"templateContent\": \"The token" output
+  assert_contains "\"templateContent\": \"ARTIFACT" output
+  assert_contains "\"key\": \"{TOKEN1}\"" output
+  assert_contains "\"value\": \"{TOKEN2}\"" output
+  assert_contains "\"key\": \"{TOKEN2}\"" output
   assert_contains "\"value\": \"123456\"" output
 }
 
@@ -1626,11 +1705,54 @@ EOF
   assert_contains "Mnemonic: FileWrite" output
   # FileWrite contents is  base64-encoded 'hello world'
   assert_contains "FileWriteContents: \[aGVsbG8gd29ybGQ=\]" output
+  assert_contains "^ *IsExecutable: false" output
 
   bazel aquery --output=textproto --include_file_write_contents "//$pkg:bar" > output 2> "$TEST_log" \
     || fail "Expected success"
   cat output >> "$TEST_log"
   assert_contains 'file_contents: "hello world"' output
+  assert_not_contains "^is_executable: true" output
+}
+
+function test_file_write_is_executable() {
+  local pkg="${FUNCNAME[0]}"
+  mkdir -p "$pkg" || fail "mkdir -p $pkg"
+  touch "$pkg/foo.sh"
+  cat > "$pkg/write_executable_file.bzl" <<'EOF'
+def _impl(ctx):
+    out = ctx.actions.declare_symlink(ctx.label.name)
+    ctx.actions.write(
+        output = out,
+        content = "Hello",
+        is_executable = True,
+    )
+    return [
+        DefaultInfo(files = depset([out]))
+    ]
+write_executable_file = rule(
+    implementation = _impl,
+    attrs = {
+        "path": attr.string(),
+    },
+)
+EOF
+  cat > "$pkg/BUILD" <<'EOF'
+load(":write_executable_file.bzl", "write_executable_file")
+write_executable_file(
+  name = "foo",
+  path = "bar/baz.txt",
+)
+EOF
+  bazel aquery --output=textproto \
+     "//$pkg:foo" >output 2> "$TEST_log" || fail "Expected success"
+  cat output >> "$TEST_log"
+  assert_contains "^is_executable: true" output
+
+  bazel aquery --output=text "//$pkg:foo" | \
+    sed -nr '/Mnemonic: FileWrite/,/^ *$/p' >output \
+      2> "$TEST_log" || fail "Expected success"
+  cat output >> "$TEST_log"
+  assert_contains "^ *IsExecutable: true" output
 }
 
 function test_source_symlink_manifest() {
@@ -1656,6 +1778,87 @@ EOF
   if which base64 >/dev/null; then
     sed -nr 's/^ *FileWriteContents: \[(.*)\]/echo \1 | base64 -d/p' output | \
        sh | tee -a "$TEST_log"  | assert_contains "$pkg/foo\.sh" -
+  fi
+}
+
+function test_unresolved_symlinks() {
+  local pkg="${FUNCNAME[0]}"
+  mkdir -p "$pkg" || fail "mkdir -p $pkg"
+  touch "$pkg/foo.sh"
+  cat > "$pkg/unresolved_symlink.bzl" <<'EOF'
+def _impl(ctx):
+    out = ctx.actions.declare_symlink(ctx.label.name)
+    ctx.actions.symlink(
+        output = out,
+        target_path = ctx.attr.path
+    )
+    return [
+        DefaultInfo(files = depset([out]))
+    ]
+unresolved_symlink = rule(
+    implementation = _impl,
+    attrs = {
+        "path": attr.string(),
+    },
+)
+EOF
+  cat > "$pkg/BUILD" <<'EOF'
+load(":unresolved_symlink.bzl", "unresolved_symlink")
+unresolved_symlink(
+  name = "foo",
+  path = "bar/baz.txt",
+)
+EOF
+  bazel aquery --output=textproto \
+     "//$pkg:foo" >output 2> "$TEST_log" || fail "Expected success"
+  cat output >> "$TEST_log"
+  assert_contains "^unresolved_symlink_target:.*bar/baz.txt" output
+
+  bazel aquery --output=text "//$pkg:foo" | \
+    sed -nr '/Mnemonic: UnresolvedSymlink/,/^ *$/p' >output \
+      2> "$TEST_log" || fail "Expected success"
+  cat output >> "$TEST_log"
+  assert_contains "^ *UnresolvedSymlinkTarget:.*bar/baz.txt" output
+}
+
+function test_does_not_fail_horribly_with_file() {
+  rm -rf peach
+  mkdir -p peach
+  cat > "peach/BUILD" <<'EOF'
+genrule(
+    name = "bar",
+    srcs = ["dummy.txt"],
+    outs = ["bar_out.txt"],
+    cmd = "echo unused > bar_out.txt",
+)
+EOF
+
+  echo "//peach:bar" > query_file
+  bazel aquery --query_file=query_file > $TEST_log
+
+  expect_log "Target: //peach:bar" "look in $TEST_log"
+  expect_log "ActionKey:"
+}
+
+function test_cpp_compile_action_env() {
+  local pkg="${FUNCNAME[0]}"
+  mkdir -p "$pkg"
+
+  touch "$pkg/main.cpp"
+  cat > "$pkg/BUILD" <<'EOF'
+cc_binary(
+    name = "main",
+    srcs = ["main.cpp"],
+)
+EOF
+  bazel aquery --output=textproto \
+     "mnemonic(CppCompile,//$pkg:main)" >output 2> "$TEST_log" || fail "Expected success"
+  cat output >> "$TEST_log"
+
+  if "$is_windows"; then
+    assert_contains '  key: "INCLUDE"' output
+  else
+    assert_contains '  key: "PWD"' output
   fi
 }
 

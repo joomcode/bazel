@@ -20,6 +20,7 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeTrue;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
@@ -42,6 +43,7 @@ import java.nio.channels.SeekableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
+import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
@@ -874,7 +876,7 @@ public abstract class FileSystemTest {
       bDir.setReadable(false);
       topDir.setReadable(false);
     } catch (UnsupportedOperationException e) {
-      // Skip testing if the file system does not support clearing the needed attibutes.
+      // Skip testing if the file system does not support clearing the needed attributes.
       return;
     }
 
@@ -922,7 +924,7 @@ public abstract class FileSystemTest {
       bDir.setWritable(false);
       topDir.setWritable(false);
     } catch (UnsupportedOperationException e) {
-      // Skip testing if the file system does not support clearing the needed attibutes.
+      // Skip testing if the file system does not support clearing the needed attributes.
       return;
     }
 
@@ -971,7 +973,7 @@ public abstract class FileSystemTest {
       bDir.setExecutable(false);
       topDir.setExecutable(false);
     } catch (UnsupportedOperationException e) {
-      // Skip testing if the file system does not support clearing the needed attibutes.
+      // Skip testing if the file system does not support clearing the needed attributes.
       return;
     }
 
@@ -1023,7 +1025,7 @@ public abstract class FileSystemTest {
       topDir.setReadable(false);
       topDir.setExecutable(false);
     } catch (UnsupportedOperationException e) {
-      // Skip testing if the file system does not support clearing the needed attibutes.
+      // Skip testing if the file system does not support clearing the needed attributes.
       return;
     }
 
@@ -1176,6 +1178,31 @@ public abstract class FileSystemTest {
   }
 
   // Test the date functions
+
+  @Test
+  public void testSetLastModifiedTime() throws Exception {
+    Path file = absolutize("file");
+    FileSystemUtils.createEmptyFile(file);
+
+    file.setLastModifiedTime(1234567890L);
+    assertThat(file.getLastModifiedTime()).isEqualTo(1234567890L);
+  }
+
+  @Test
+  public void testSetLastModifiedTimeWithSentinel() throws Exception {
+    Path file = absolutize("file");
+    FileSystemUtils.createEmptyFile(file);
+
+    // To avoid sleeping, first set the modification time to the past.
+    long pastTime = Instant.now().minusSeconds(1).toEpochMilli();
+    file.setLastModifiedTime(pastTime);
+
+    // Even if we get the system time before the setLastModifiedTime call, getLastModifiedTime may
+    // return a time which is slightly behind. Simply check that it's greater than the past time.
+    file.setLastModifiedTime(Path.NOW_SENTINEL_TIME);
+    assertThat(file.getLastModifiedTime()).isGreaterThan(pastTime);
+  }
+
   @Test
   public void testCreateFileChangesTimeOfDirectory() throws Exception {
     storeReferenceTime(workingDir.getLastModifiedTime());
@@ -1302,6 +1329,20 @@ public abstract class FileSystemTest {
         assertThat(readValue).isEqualTo(i);
       }
     }
+  }
+
+  @Test
+  public void testInputStreamPermissionError() throws Exception {
+    assertThat(xFile.exists()).isTrue();
+    xFile.setReadable(false);
+    assertThrows(FileAccessException.class, () -> xFile.getInputStream());
+  }
+
+  @Test
+  public void testOutputStreamPermissionError() throws Exception {
+    assertThat(xFile.exists()).isTrue();
+    xFile.setWritable(false);
+    assertThrows(FileAccessException.class, () -> xFile.getOutputStream());
   }
 
   @Test
@@ -1754,29 +1795,68 @@ public abstract class FileSystemTest {
 
   @Test
   public void testResolveSymlinks() throws Exception {
-    if (testFS.supportsSymbolicLinksNatively(xLink.asFragment())) {
-      createSymbolicLink(xLink, xFile);
-      FileSystemUtils.createEmptyFile(xFile);
-      assertThat(testFS.resolveOneLink(xLink.asFragment())).isEqualTo(xFile.asFragment());
-      assertThat(xLink.resolveSymbolicLinks()).isEqualTo(xFile);
-    }
+    assumeTrue(testFS.supportsSymbolicLinksNatively(xLink.asFragment()));
+
+    createSymbolicLink(xLink, xFile);
+    FileSystemUtils.createEmptyFile(xFile);
+    assertThat(testFS.resolveOneLink(xLink.asFragment())).isEqualTo(xFile.asFragment());
+    assertThat(xLink.resolveSymbolicLinks()).isEqualTo(xFile);
   }
 
   @Test
   public void testResolveDanglingSymlinks() throws Exception {
-    if (testFS.supportsSymbolicLinksNatively(xLink.asFragment())) {
-      createSymbolicLink(xLink, xNothing);
-      assertThat(testFS.resolveOneLink(xLink.asFragment())).isEqualTo(xNothing.asFragment());
-      assertThrows(IOException.class, () -> xLink.resolveSymbolicLinks());
-    }
+    assumeTrue(testFS.supportsSymbolicLinksNatively(xLink.asFragment()));
+
+    createSymbolicLink(xLink, xNothing);
+    assertThat(testFS.resolveOneLink(xLink.asFragment())).isEqualTo(xNothing.asFragment());
+    assertThrows(IOException.class, () -> xLink.resolveSymbolicLinks());
   }
 
   @Test
   public void testResolveNonSymlinks() throws Exception {
-    if (testFS.supportsSymbolicLinksNatively(xFile.asFragment())) {
-      assertThat(testFS.resolveOneLink(xFile.asFragment())).isNull();
-      assertThat(xFile.resolveSymbolicLinks()).isEqualTo(xFile);
-    }
+    assertThat(testFS.resolveOneLink(xFile.asFragment())).isNull();
+    assertThat(xFile.resolveSymbolicLinks()).isEqualTo(xFile);
+  }
+
+  @Test
+  public void testReaddir() throws Exception {
+    Path dir = workingDir.getChild("readdir");
+
+    assumeTrue(testFS.supportsSymbolicLinksNatively(dir.asFragment()));
+
+    dir.getChild("dir").createDirectoryAndParents();
+    FileSystemUtils.createEmptyFile(dir.getChild("file"));
+    dir.getChild("file_link").createSymbolicLink(dir.getChild("file"));
+    dir.getChild("dir_link").createSymbolicLink(dir.getChild("dir"));
+    dir.getChild("looping_link").createSymbolicLink(dir.getChild("looping_link"));
+    dir.getChild("dangling_link").createSymbolicLink(testFS.getPath("/does_not_exist"));
+
+    assertThat(dir.getDirectoryEntries())
+        .containsExactly(
+            dir.getChild("file"),
+            dir.getChild("dir"),
+            dir.getChild("file_link"),
+            dir.getChild("dir_link"),
+            dir.getChild("looping_link"),
+            dir.getChild("dangling_link"));
+
+    assertThat(dir.readdir(Symlinks.NOFOLLOW))
+        .containsExactly(
+            new Dirent("file", Dirent.Type.FILE),
+            new Dirent("dir", Dirent.Type.DIRECTORY),
+            new Dirent("file_link", Dirent.Type.SYMLINK),
+            new Dirent("dir_link", Dirent.Type.SYMLINK),
+            new Dirent("looping_link", Dirent.Type.SYMLINK),
+            new Dirent("dangling_link", Dirent.Type.SYMLINK));
+
+    assertThat(dir.readdir(Symlinks.FOLLOW))
+        .containsExactly(
+            new Dirent("file", Dirent.Type.FILE),
+            new Dirent("dir", Dirent.Type.DIRECTORY),
+            new Dirent("file_link", Dirent.Type.FILE),
+            new Dirent("dir_link", Dirent.Type.DIRECTORY),
+            new Dirent("looping_link", Dirent.Type.UNKNOWN),
+            new Dirent("dangling_link", Dirent.Type.UNKNOWN));
   }
 
   @Test

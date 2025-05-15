@@ -33,6 +33,8 @@ fail_if_no_android_sdk
 source "${CURRENT_DIR}/../../integration_test_setup.sh" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
 
+resolve_android_toolchains
+
 function test_android_sdk_repository_path_from_environment() {
   create_new_workspace
   setup_android_sdk_support
@@ -51,6 +53,7 @@ EOF
 
 function test_android_sdk_repository_no_path_or_android_home() {
   create_new_workspace
+  setup_android_platforms
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 android_sdk_repository(
     name = "androidsdk",
@@ -63,6 +66,7 @@ EOF
 
 function test_android_sdk_repository_wrong_path() {
   create_new_workspace
+  setup_android_platforms
   mkdir "$TEST_SRCDIR/some_dir"
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 android_sdk_repository(
@@ -81,12 +85,15 @@ function test_specifying_android_sdk_flag() {
   create_new_workspace
   setup_android_sdk_support
   create_android_binary
+  setup_android_platforms
+
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 android_sdk_repository(
     name = "a",
 )
 EOF
   ANDROID_HOME=$ANDROID_SDK bazel build --android_sdk=@a//:sdk-24 \
+    --android_platforms=//test_android_platforms:simple \
     //java/bazel:bin || fail "build with --android_sdk failed"
 }
 
@@ -99,12 +106,13 @@ function test_android_sdk_repository_returns_null_if_env_vars_missing() {
   sed -i -e 's/path =/#path =/g' WORKSPACE
   ANDROID_HOME=/does_not_exist_2 bazel build @androidsdk//:files && \
     fail "Build should have failed"
-  ANDROID_HOME=$ANDROID_SDK bazel build @androidsdk//:files || "Build failed"
+  ANDROID_HOME=$ANDROID_SDK bazel build @androidsdk//:files || fail "Build failed"
 }
 
 # Regression test for https://github.com/bazelbuild/bazel/issues/12069
 function test_android_sdk_repository_present_not_set() {
   create_new_workspace
+  setup_android_platforms
   cat >> WORKSPACE <<EOF
 android_sdk_repository(
     name = "androidsdk",

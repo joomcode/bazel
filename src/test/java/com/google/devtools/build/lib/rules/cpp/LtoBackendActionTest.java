@@ -32,6 +32,7 @@ import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.SingleRunfilesSupplier;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
+import com.google.devtools.build.lib.analysis.config.BuildConfigurationValue.RunfileSymlinksMode;
 import com.google.devtools.build.lib.analysis.util.ActionTester;
 import com.google.devtools.build.lib.analysis.util.ActionTester.ActionCombinationFactory;
 import com.google.devtools.build.lib.analysis.util.AnalysisTestUtil;
@@ -45,7 +46,6 @@ import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.SyscallCache;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.Before;
@@ -92,19 +92,19 @@ public class LtoBackendActionTest extends BuildViewTestCase {
     context =
         new ActionExecutionContext(
             executor,
-            /*actionInputFileCache=*/ null,
+            /* inputMetadataProvider= */ null,
             ActionInputPrefetcher.NONE,
             actionKeyContext,
-            /*metadataHandler=*/ null,
-            /*rewindingEnabled=*/ false,
+            /* outputMetadataStore= */ null,
+            /* rewindingEnabled= */ false,
             LostInputsCheck.NONE,
             new FileOutErr(),
             new StoredEventHandler(),
-            /*clientEnv=*/ ImmutableMap.of(),
-            /*topLevelFilesets=*/ ImmutableMap.of(),
-            /*artifactExpander=*/ null,
-            /*actionFileSystem=*/ null,
-            /*skyframeDepsResult=*/ null,
+            /* clientEnv= */ ImmutableMap.of(),
+            /* topLevelFilesets= */ ImmutableMap.of(),
+            /* artifactExpander= */ null,
+            /* actionFileSystem= */ null,
+            /* skyframeDepsResult= */ null,
             DiscoveredModulesPruner.DEFAULT,
             SyscallCache.NO_CACHE,
             ThreadStateReceiver.NULL_INSTANCE);
@@ -131,11 +131,11 @@ public class LtoBackendActionTest extends BuildViewTestCase {
         .isEqualTo(AbstractAction.DEFAULT_RESOURCE_SET);
     assertThat(action.getArguments()).containsExactly("/bin/clang");
     assertThat(action.getProgressMessage()).isEqualTo("Test");
-    assertThat(action.inputsDiscovered()).isFalse();
+    assertThat(action.inputsKnown()).isFalse();
 
     // Discover inputs, which should not add any inputs since bitcode1.imports is empty.
     action.discoverInputs(context);
-    assertThat(action.inputsDiscovered()).isTrue();
+    assertThat(action.inputsKnown()).isTrue();
     assertThat(action.getInputs().toList()).containsExactly(bitcode1Artifact, index1Artifact);
   }
 
@@ -160,11 +160,11 @@ public class LtoBackendActionTest extends BuildViewTestCase {
         .isEqualTo(AbstractAction.DEFAULT_RESOURCE_SET);
     assertThat(action.getArguments()).containsExactly("/bin/clang");
     assertThat(action.getProgressMessage()).isEqualTo("Test");
-    assertThat(action.inputsDiscovered()).isFalse();
+    assertThat(action.inputsKnown()).isFalse();
 
     // Discover inputs, which should add bitcode1.o which is listed in bitcode2.imports.
     action.discoverInputs(context);
-    assertThat(action.inputsDiscovered()).isTrue();
+    assertThat(action.inputsKnown()).isTrue();
     assertThat(action.getInputs().toList())
         .containsExactly(bitcode1Artifact, bitcode2Artifact, index2Artifact);
   }
@@ -173,10 +173,8 @@ public class LtoBackendActionTest extends BuildViewTestCase {
     EXECUTABLE,
     IMPORTS_INFO,
     MNEMONIC,
-    RUNFILES_SUPPLIER,
     INPUT,
-    FIXED_ENVIRONMENT,
-    VARIABLE_ENVIRONMENT
+    FIXED_ENVIRONMENT
   }
 
   @Test
@@ -212,23 +210,14 @@ public class LtoBackendActionTest extends BuildViewTestCase {
 
             builder.setMnemonic(attributesToFlip.contains(KeyAttributes.MNEMONIC) ? "a" : "b");
 
-            if (attributesToFlip.contains(KeyAttributes.RUNFILES_SUPPLIER)) {
-              builder.addRunfilesSupplier(
-                  new SingleRunfilesSupplier(
-                      PathFragment.create("a"),
-                      Runfiles.EMPTY,
-                      artifactA,
-                      /* buildRunfileLinks= */ false,
-                      /* runfileLinksEnabled= */ false));
-            } else {
-              builder.addRunfilesSupplier(
-                  new SingleRunfilesSupplier(
-                      PathFragment.create("a"),
-                      Runfiles.EMPTY,
-                      artifactB,
-                      /* buildRunfileLinks= */ false,
-                      /* runfileLinksEnabled= */ false));
-            }
+            builder.addRunfilesSupplier(
+                new SingleRunfilesSupplier(
+                    PathFragment.create("a"),
+                    Runfiles.EMPTY,
+                    /* repoMappingManifest= */ null,
+                    RunfileSymlinksMode.SKIP,
+                    /* buildRunfileLinks= */ false,
+                    /* runfilesMiddleman= */ null));
 
             if (attributesToFlip.contains(KeyAttributes.INPUT)) {
               builder.addInput(artifactA);
@@ -241,9 +230,6 @@ public class LtoBackendActionTest extends BuildViewTestCase {
               env.put("foo", "bar");
             }
             builder.setEnvironment(env);
-            if (attributesToFlip.contains(KeyAttributes.VARIABLE_ENVIRONMENT)) {
-              builder.setInheritedEnvironment(Arrays.asList("baz"));
-            }
 
             SpawnAction action = builder.build(ActionsTestUtil.NULL_ACTION_OWNER, targetConfig);
             collectingAnalysisEnvironment.registerAction(action);

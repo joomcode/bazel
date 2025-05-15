@@ -1,6 +1,9 @@
 load("@rules_java//java:defs.bzl", "java_library")
 
-package(default_visibility = ["//src:__subpackages__"])
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//src:__subpackages__"],
+)
 
 filegroup(
     name = "srcs",
@@ -23,8 +26,12 @@ java_library(
         exclude = [
             "SerializationConstants.java",
             "CodecScanningConstants.java",
+            "VisibleForSerialization.java",
         ],
     ),
+    add_opens = [
+        "java.base/java.lang.invoke",
+    ],
     deps = [
         ":codec-scanning-constants",
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/autocodec:registered-singleton",
@@ -46,4 +53,9 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/util:TestType",
         "//src/main/java/com/google/devtools/build/lib/util:resource_usage",
     ],
+)
+
+java_library(
+    name = "visible-for-serialization",
+    srcs = ["VisibleForSerialization.java"],
 )

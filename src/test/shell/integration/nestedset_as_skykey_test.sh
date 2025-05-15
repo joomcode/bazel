@@ -114,7 +114,7 @@ foo_binary = rule(
         "srcs": attr.label_list(allow_files=True),
         "deps": attr.label_list(),
         "_foocc": attr.label(default=Label("//foo:foocc"),
-                             allow_files=True, executable=True, cfg="host")
+                             allow_files=True, executable=True, cfg="exec")
     },
     outputs = {"out": "%{name}.out"},
 )
@@ -128,6 +128,8 @@ function test_dirty_file() {
   export DONT_SANITY_CHECK_SERIALIZATION=1
   cat > foo/BUILD <<EOF
 load(":foo.bzl", "foo_library", "foo_binary")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+
 py_binary(
     name = "foocc",
     srcs = ["foocc.py"],

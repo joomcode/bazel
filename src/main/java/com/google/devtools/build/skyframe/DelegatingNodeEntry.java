@@ -14,8 +14,7 @@
 package com.google.devtools.build.skyframe;
 
 import com.google.common.collect.ImmutableSet;
-import com.google.devtools.build.lib.util.GroupedList;
-import com.google.devtools.build.lib.util.GroupedList.GroupedListHelper;
+import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import javax.annotation.Nullable;
@@ -105,7 +104,7 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public Iterable<SkyKey> getAllDirectDepsForIncompleteNode() throws InterruptedException {
+  public ImmutableSet<SkyKey> getAllDirectDepsForIncompleteNode() throws InterruptedException {
     return getDelegate().getAllDirectDepsForIncompleteNode();
   }
 
@@ -115,7 +114,7 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public Iterable<SkyKey> getAllReverseDepsForNodeBeingDeleted() {
+  public Collection<SkyKey> getAllReverseDepsForNodeBeingDeleted() {
     return getDelegate().getAllReverseDepsForNodeBeingDeleted();
   }
 
@@ -125,7 +124,7 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public GroupedList<SkyKey> getTemporaryDirectDeps() {
+  public GroupedDeps getTemporaryDirectDeps() {
     return getDelegate().getTemporaryDirectDeps();
   }
 
@@ -140,18 +139,38 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public void resetForRestartFromScratch() {
-    getDelegate().resetForRestartFromScratch();
+  public void resetEvaluationFromScratch() {
+    getDelegate().resetEvaluationFromScratch();
   }
 
   @Override
-  public Set<SkyKey> addTemporaryDirectDeps(GroupedListHelper<SkyKey> helper) {
-    return getDelegate().addTemporaryDirectDeps(helper);
+  public ImmutableSet<SkyKey> getResetDirectDeps() {
+    return getDelegate().getResetDirectDeps();
   }
 
   @Override
-  public boolean isReady() {
-    return getDelegate().isReady();
+  public void addSingletonTemporaryDirectDep(SkyKey dep) {
+    getDelegate().addSingletonTemporaryDirectDep(dep);
+  }
+
+  @Override
+  public void addTemporaryDirectDepGroup(List<SkyKey> group) {
+    getDelegate().addTemporaryDirectDepGroup(group);
+  }
+
+  @Override
+  public void addTemporaryDirectDepsInGroups(Set<SkyKey> deps, List<Integer> groupSizes) {
+    getDelegate().addTemporaryDirectDepsInGroups(deps, groupSizes);
+  }
+
+  @Override
+  public boolean isReadyToEvaluate() {
+    return getDelegate().isReadyToEvaluate();
+  }
+
+  @Override
+  public boolean hasUnsignaledDeps() {
+    return getDelegate().hasUnsignaledDeps();
   }
 
   @Override
@@ -185,7 +204,7 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public Iterable<SkyKey> getReverseDepsForDoneEntry() throws InterruptedException {
+  public Collection<SkyKey> getReverseDepsForDoneEntry() throws InterruptedException {
     return getDelegate().getReverseDepsForDoneEntry();
   }
 
@@ -203,11 +222,6 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   @Nullable
   public MarkedDirtyResult markDirty(DirtyType dirtyType) throws InterruptedException {
     return getDelegate().markDirty(dirtyType);
-  }
-
-  @Override
-  public void addTemporaryDirectDepsGroupToDirtyEntry(List<SkyKey> group) {
-    getDelegate().addTemporaryDirectDepsGroupToDirtyEntry(group);
   }
 
   @Override

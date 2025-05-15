@@ -3,6 +3,8 @@ Book: /_book.yaml
 
 # Bazel Tutorial: Configure C++ Toolchains
 
+{% include "_buttons.html" %}
+
 This tutorial uses an example scenario to describe how to configure C++
 toolchains for a project. It's based on an
 [example C++ project](https://github.com/bazelbuild/examples/tree/master/cpp-tutorial/stage1)
@@ -135,7 +137,7 @@ slightly between different versions of clang.
     ```
 
     Bazel discovered that the `--crosstool_top` flag points to a rule that
-    doesn't provide the necessary [`ToolchainInfo`](/rules/lib/ToolchainInfo)
+    doesn't provide the necessary [`ToolchainInfo`](/rules/lib/providers/ToolchainInfo)
     provider. So you need to point `--crosstool_top` to a rule that does provide
     `ToolchainInfo` - that is the `cc_toolchain_suite` rule. In the
     `toolchain/BUILD` file, replace the empty filegroup with the following:
@@ -228,7 +230,7 @@ slightly between different versions of clang.
 
     `cc_common.create_cc_toolchain_config_info()` creates the needed provider
     `CcToolchainConfigInfo`. To use the `cc_toolchain_config` rule, add a load
-    statement to `toolchains/BUILD`:
+    statement to `toolchain/BUILD` right below the package statement:
 
     ```python
     load(":cc_toolchain_config.bzl", "cc_toolchain_config")
@@ -326,7 +328,7 @@ slightly between different versions of clang.
      Bazel needs to know where to search for included headers. There are
      multiple ways to solve this, such as using the `includes` attribute of
      `cc_binary`, but here this is solved at the toolchain level with the
-     [`cxx_builtin_include_directories`](/rules/lib/cc_common#create_cc_toolchain_config_info)
+     [`cxx_builtin_include_directories`](/rules/lib/toplevel/cc_common#create_cc_toolchain_config_info)
      parameter of `cc_common.create_cc_toolchain_config_info`. Beware that if
      you are using a different version of `clang`, the include path will be
      different. These paths may also be different depending on the distribution.

@@ -52,12 +52,11 @@
 # respectively.  Similarly, "cleanup" and "timeout" may be redefined,
 # and these function are called upon exit (of any kind) or a timeout.
 #
-# The user can pass --test_arg to blaze test to select specific tests
-# to run. Specifying --test_arg multiple times allows to select several
-# tests to be run in the given order. Additionally the user may define
-# TESTS=(test_foo test_bar ...) to specify a subset of test functions to
-# execute, for example, a working set during debugging. By default, all
-# functions called test_* will be executed.
+# The user can pass --test_filter to blaze test to select specific tests
+# to run with Bash globs. A union of tests matching any of the provided globs
+# will be run. Additionally the user may define TESTS=(test_foo test_bar ...) to
+# specify a subset of test functions to execute, for example, a working set
+# during debugging. By default, all functions called test_* will be executed.
 #
 # This file provides utilities for assertions over the output of a
 # command.  The output of the command under test is directed to the
@@ -516,6 +515,32 @@ function assert_contains_n() {
     (( count == expectednum )) && return 0
 
     cat "$file" >&2
+    fail "$message"
+    return 1
+}
+
+# Usage: assert_exists <file> [error-message]
+# Asserts that the file exists.
+function assert_exists() {
+    local file=$1
+    local message=${2:-"Expected '$file' to exist"}
+    if [[ -f "$file" ]]; then
+        return 0
+    fi
+
+    fail "$message"
+    return 1
+}
+
+# Usage: assert_not_exists <file> [error-message]
+# Asserts that the file does not exist.
+function assert_not_exists() {
+    local file=$1
+    local message=${2:-"Expected '$file' to not exist"}
+    if ! [[ -f "$file" ]]; then
+        return 0
+    fi
+
     fail "$message"
     return 1
 }

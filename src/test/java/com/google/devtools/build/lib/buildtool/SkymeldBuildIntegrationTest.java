@@ -18,20 +18,27 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.devtools.build.lib.testutil.TestConstants.WORKSPACE_NAME;
 import static org.junit.Assert.assertThrows;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Sets;
 import com.google.common.eventbus.Subscribe;
 import com.google.devtools.build.lib.actions.BuildFailedException;
 import com.google.devtools.build.lib.analysis.AnalysisPhaseCompleteEvent;
 import com.google.devtools.build.lib.analysis.ViewCreationFailedException;
 import com.google.devtools.build.lib.buildtool.util.BuildIntegrationTestCase;
+import com.google.devtools.build.lib.skyframe.SkymeldModule;
 import com.google.devtools.build.lib.skyframe.TopLevelStatusEvents.TopLevelEntityAnalysisConcludedEvent;
+import com.google.devtools.build.lib.util.io.RecordingOutErr;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.testing.junit.testparameterinjector.TestParameter;
 import com.google.testing.junit.testparameterinjector.TestParameterInjector;
 import java.io.IOException;
-import java.util.Set;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -39,13 +46,13 @@ import org.junit.runner.RunWith;
 /** Integration tests for project Skymeld: interleaving Skyframe's analysis and execution phases. */
 @RunWith(TestParameterInjector.class)
 public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
-  private AnalysisEventsSubscriber analysisEventsSubscriber;
+  private EventsSubscriber eventsSubscriber;
 
   @Before
   public void setUp() {
     addOptions("--experimental_merged_skyframe_analysis_execution");
-    this.analysisEventsSubscriber = new AnalysisEventsSubscriber();
-    runtimeWrapper.registerSubscriber(analysisEventsSubscriber);
+    this.eventsSubscriber = new EventsSubscriber();
+    runtimeWrapper.registerSubscriber(eventsSubscriber);
   }
 
   /** A simple rule that has srcs, deps and writes these attributes to its output. */
@@ -119,8 +126,12 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
         "environment(name = 'two')");
   }
 
-  private void assertSingleOutputBuilt(String target) throws Exception {
-    assertThat(Iterables.getOnlyElement(getArtifacts(target)).getPath().isFile()).isTrue();
+  @CanIgnoreReturnValue
+  private Path assertSingleOutputBuilt(String target) throws Exception {
+    Path singleOutput = Iterables.getOnlyElement(getArtifacts(target)).getPath();
+    assertThat(singleOutput.isFile()).isTrue();
+
+    return singleOutput;
   }
 
   @Test
@@ -133,12 +144,14 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
     write("foo/foo.in");
     addOptions("--nobuild");
 
+    RecordingOutErr recordedOutput = divertInfoLogToOutErr();
     BuildResult result = buildTarget("//foo:foo");
 
     assertThat(result.getSuccess()).isTrue();
-    events.assertContainsWarning(
-        "--experimental_merged_skyframe_analysis_execution is incompatible with --nobuild and will"
-            + " be ignored");
+    assertThat(recordedOutput.errAsLatin1())
+        .containsMatch(
+            "--experimental_merged_skyframe_analysis_execution is incompatible with --nobuild"
+                + " and will be ignored");
   }
 
   @Test
@@ -161,7 +174,7 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
     assertThat(getLabelsOfAnalyzedTargets()).containsExactly("//foo:foo", "//foo:bar");
     assertThat(getLabelsOfBuiltTargets()).containsExactly("//foo:foo", "//foo:bar");
 
-    assertThat(analysisEventsSubscriber.getTopLevelEntityAnalysisConcludedEvents()).hasSize(2);
+    assertThat(eventsSubscriber.getTopLevelEntityAnalysisConcludedEvents()).hasSize(2);
     assertSingleAnalysisPhaseCompleteEventWithLabels("//foo:foo", "//foo:bar");
 
     assertThat(directories.getOutputPath(WORKSPACE_NAME).getRelative("build-info.txt").isFile())
@@ -237,7 +250,7 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
     addOptions("--aspects=//foo:aspect.bzl%execution_err_aspect", "--output_groups=files");
     assertThrows(BuildFailedException.class, () -> buildTarget("//foo:foo"));
     events.assertContainsError(
-        "Action foo/aspect_output failed: (Exit 1): bash failed: error executing command");
+        "Action foo/aspect_output failed: (Exit 1): bash failed: error executing Action command");
   }
 
   @Test
@@ -287,6 +300,30 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
           () -> buildTarget("//foo:foo", "//foo:analysis_failure"));
     }
     events.assertContainsError("rule '//foo:missing' does not exist");
+  }
+
+  // Regression test for https://github.com/bazelbuild/bazel/issues/20443
+  @Test
+  public void testKeepGoingWarningContainsDetails() throws Exception {
+    addOptions("--keep_going");
+    write(
+        "foo/BUILD",
+        "constraint_setting(name = 'incompatible_setting')",
+        "constraint_value(",
+        "    name = 'incompatible',",
+        "    constraint_setting = ':incompatible_setting',",
+        "    visibility = ['//visibility:public']",
+        ")",
+        "cc_library(",
+        "    name = 'foo',",
+        "    srcs = ['foo.cc'],",
+        "    target_compatible_with = ['//foo:incompatible']",
+        ")");
+    assertThrows(BuildFailedException.class, () -> buildTarget("//foo:foo"));
+    events.assertContainsWarning(
+        "errors encountered while analyzing target '//foo:foo', it will not be built.");
+    // The details.
+    events.assertContainsWarning("Dependency chain:");
   }
 
   @Test
@@ -354,6 +391,36 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
   }
 
   @Test
+  public void symlinksPlantedExceptProductNamePrefixAndIgnoredPaths() throws Exception {
+    String productName = getRuntime().getProductName();
+    Path execroot = directories.getExecRoot(directories.getWorkspace().getBaseName());
+    writeMyRuleBzl();
+    Path fooDir =
+        write(
+                "foo/BUILD",
+                "load('//foo:my_rule.bzl', 'my_rule')",
+                "my_rule(name = 'foo', srcs = ['foo.in'])")
+            .getParentDirectory();
+    write("foo/foo.in");
+    Path unusedDir = write("unused/dummy").getParentDirectory();
+    write(".bazelignore", "ignored");
+    write("ignored/dummy");
+    write(productName + "-dir/dummy");
+
+    // Before the build: no symlink.
+    assertThat(execroot.getRelative("foo").exists()).isFalse();
+
+    buildTarget("//foo:foo");
+
+    // After the build: symlinks to the source directory, even unused packages, except for those
+    // in the .bazelignore file and those with the bazel- prefix.
+    assertThat(execroot.getRelative("foo").resolveSymbolicLinks()).isEqualTo(fooDir);
+    assertThat(execroot.getRelative("unused").resolveSymbolicLinks()).isEqualTo(unusedDir);
+    assertThat(execroot.getRelative("ignored").exists()).isFalse();
+    assertThat(execroot.getRelative(productName + "-dir").exists()).isFalse();
+  }
+
+  @Test
   public void symlinksReplantedEachBuild() throws Exception {
     Path execroot = directories.getExecRoot(directories.getWorkspace().getBaseName());
     writeMyRuleBzl();
@@ -385,7 +452,6 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
   public void targetAnalysisFailure_skymeld_correctAnalysisEvents(@TestParameter boolean keepGoing)
       throws Exception {
     addOptions("--keep_going=" + keepGoing);
-    addOptions("--experimental_merged_skyframe_analysis_execution");
     writeMyRuleBzl();
     write(
         "foo/BUILD",
@@ -398,13 +464,13 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
       assertThrows(
           BuildFailedException.class, () -> buildTarget("//foo:foo", "//foo:analysis_failure"));
 
-      assertThat(analysisEventsSubscriber.getTopLevelEntityAnalysisConcludedEvents()).hasSize(2);
+      assertThat(eventsSubscriber.getTopLevelEntityAnalysisConcludedEvents()).hasSize(2);
       assertSingleAnalysisPhaseCompleteEventWithLabels("//foo:foo");
     } else {
       assertThrows(
           ViewCreationFailedException.class,
           () -> buildTarget("//foo:foo", "//foo:analysis_failure"));
-      assertThat(analysisEventsSubscriber.getAnalysisPhaseCompleteEvents()).isEmpty();
+      assertThat(eventsSubscriber.getAnalysisPhaseCompleteEvents()).isEmpty();
     }
   }
 
@@ -423,11 +489,11 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
     addOptions("--aspects=//foo:aspect.bzl%analysis_err_aspect", "--output_groups=files");
     if (keepGoing) {
       assertThrows(BuildFailedException.class, () -> buildTarget("//foo:foo"));
-      assertThat(analysisEventsSubscriber.getTopLevelEntityAnalysisConcludedEvents()).hasSize(2);
+      assertThat(eventsSubscriber.getTopLevelEntityAnalysisConcludedEvents()).hasSize(2);
       assertSingleAnalysisPhaseCompleteEventWithLabels("//foo:foo");
     } else {
       assertThrows(ViewCreationFailedException.class, () -> buildTarget("//foo:foo"));
-      assertThat(analysisEventsSubscriber.getAnalysisPhaseCompleteEvents()).isEmpty();
+      assertThat(eventsSubscriber.getAnalysisPhaseCompleteEvents()).isEmpty();
     }
     events.assertContainsError("compilation of module 'foo/aspect.bzl' failed");
   }
@@ -447,17 +513,17 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
       assertThrows(
           BuildFailedException.class, () -> buildTarget("//foo:good_bar", "//foo:bad_bar"));
 
-      assertThat(analysisEventsSubscriber.getTopLevelEntityAnalysisConcludedEvents()).hasSize(2);
-      assertThat(analysisEventsSubscriber.getAnalysisPhaseCompleteEvents()).hasSize(1);
+      assertThat(eventsSubscriber.getTopLevelEntityAnalysisConcludedEvents()).hasSize(2);
+      assertThat(eventsSubscriber.getAnalysisPhaseCompleteEvents()).hasSize(1);
       AnalysisPhaseCompleteEvent analysisPhaseCompleteEvent =
-          Iterables.getOnlyElement(analysisEventsSubscriber.getAnalysisPhaseCompleteEvents());
+          Iterables.getOnlyElement(eventsSubscriber.getAnalysisPhaseCompleteEvents());
       assertThat(analysisPhaseCompleteEvent.getTimeInMs()).isGreaterThan(0);
       assertThat(getLabelsOfAnalyzedTargets(analysisPhaseCompleteEvent))
           .containsExactly("//foo:good_bar", "//foo:bad_bar");
     } else {
       assertThrows(
           ViewCreationFailedException.class, () -> buildTarget("//foo:good_bar", "//foo:bad_bar"));
-      assertThat(analysisEventsSubscriber.getAnalysisPhaseCompleteEvents()).isEmpty();
+      assertThat(eventsSubscriber.getAnalysisPhaseCompleteEvents()).isEmpty();
     }
   }
 
@@ -470,10 +536,220 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
     assertThat(result.getSuccess()).isTrue();
   }
 
+  @Test
+  public void explain_ignoreSkymeldWithWarning() throws Exception {
+    addOptions("--explain=/dev/null");
+    write("foo/BUILD", "genrule(name = 'foo', outs = ['foo.out'], cmd = 'touch $@')");
+    RecordingOutErr recordedOutput = divertInfoLogToOutErr();
+    BuildResult buildResult = buildTarget("//foo");
+
+    assertThat(buildResult.getSuccess()).isTrue();
+
+    assertThat(recordedOutput.errAsLatin1())
+        .containsMatch(
+            "--experimental_merged_skyframe_analysis_execution is incompatible with --explain"
+                + " and will be ignored.");
+  }
+
+  @Test
+  public void multiplePackagePath_ignoreSkymeldWithWarning() throws Exception {
+    write("foo/BUILD", "genrule(name = 'foo', outs = ['foo.out'], cmd = 'touch $@')");
+    write("otherroot/bar/BUILD", "genrule(name = 'bar', outs = ['bar.out'], cmd = 'touch $@')");
+    addOptions("--package_path=%workspace%:otherroot");
+
+    RecordingOutErr recordedOutput = divertInfoLogToOutErr();
+    BuildResult buildResult = buildTarget("//foo", "//bar");
+
+    assertThat(buildResult.getSuccess()).isTrue();
+
+    assertThat(recordedOutput.errAsLatin1())
+        .containsMatch(
+            "--experimental_merged_skyframe_analysis_execution is incompatible with multiple"
+                + " --package_path.*and its value will be ignored.");
+  }
+
+  // Regression test for b/245919888.
+  @Test
+  public void outputFileRemoved_regeneratedWithIncrementalBuild() throws Exception {
+    writeMyRuleBzl();
+    write(
+        "foo/BUILD",
+        "load('//foo:my_rule.bzl', 'my_rule')",
+        "my_rule(name = 'foo', srcs = ['foo.in'])");
+    write("foo/foo.in");
+
+    BuildResult result = buildTarget("//foo:foo");
+
+    assertThat(result.getSuccess()).isTrue();
+    Path fooOut = assertSingleOutputBuilt("//foo:foo");
+
+    fooOut.delete();
+
+    BuildResult incrementalBuild = buildTarget("//foo:foo");
+
+    assertThat(incrementalBuild.getSuccess()).isTrue();
+    assertSingleOutputBuilt("//foo:foo");
+  }
+
+  // Regression test for b/245922900.
+  @Test
+  public void executionFailure_discardAnalysisCache_doesNotCrash() throws Exception {
+    addOptions("--experimental_merged_skyframe_analysis_execution", "--discard_analysis_cache");
+    writeExecutionFailureAspectBzl();
+    write(
+        "foo/BUILD",
+        "cc_library(name = 'foo', srcs = ['foo.cc'], deps = [':bar'])",
+        "cc_library(name = 'bar', srcs = ['bar.cc'])");
+    write("foo/foo.cc");
+    write("foo/bar.cc");
+    addOptions("--aspects=//foo:aspect.bzl%execution_err_aspect", "--output_groups=files");
+
+    // Verify that the build did not crash.
+    assertThrows(BuildFailedException.class, () -> buildTarget("//foo:foo"));
+    events.assertContainsError(
+        "Action foo/aspect_output failed: (Exit 1): bash failed: error executing Action command");
+  }
+
+  @Test
+  public void targetCycle_doesNotCrash() throws Exception {
+    write(
+        "a/BUILD",
+        "alias(name='a', actual=':b')",
+        "alias(name='b', actual=':c')",
+        "alias(name='c', actual=':a')",
+        "filegroup(name='d', srcs=[':c'])");
+    assertThrows(ViewCreationFailedException.class, () -> buildTarget("//a:d"));
+    events.assertContainsError("cycle in dependency graph");
+  }
+
+  @Test
+  public void analysisOverlapPercentageSanityCheck_success() throws Exception {
+    writeMyRuleBzl();
+    write(
+        "foo/BUILD",
+        "load('//foo:my_rule.bzl', 'my_rule')",
+        "my_rule(name = 'bar', srcs = ['bar.in'])",
+        "my_rule(name = 'foo', srcs = ['foo.in'])");
+    write("foo/foo.in");
+    write("foo/bar.in");
+
+    addOptions("--experimental_skymeld_analysis_overlap_percentage=5");
+    BuildResult result = buildTarget("//foo:foo", "//foo:bar");
+
+    assertThat(result.getSuccess()).isTrue();
+    assertSingleOutputBuilt("//foo:foo");
+    assertSingleOutputBuilt("//foo:bar");
+
+    assertThat(getLabelsOfAnalyzedTargets()).containsExactly("//foo:foo", "//foo:bar");
+    assertThat(getLabelsOfBuiltTargets()).containsExactly("//foo:foo", "//foo:bar");
+
+    assertThat(eventsSubscriber.getTopLevelEntityAnalysisConcludedEvents()).hasSize(2);
+    assertSingleAnalysisPhaseCompleteEventWithLabels("//foo:foo", "//foo:bar");
+  }
+
+  // Regression test for b/277783687.
+  @Test
+  public void targetAnalysisFailureNullBuild_correctErrorsPropagated(
+      @TestParameter boolean keepGoing) throws Exception {
+    addOptions("--keep_going=" + keepGoing);
+    writeMyRuleBzl();
+    write(
+        "foo/BUILD",
+        "load('//foo:my_rule.bzl', 'my_rule')",
+        "my_rule(name = 'analysis_failure', srcs = ['foo.in'], deps = [':missing'])");
+    write("foo/foo.in");
+
+    if (keepGoing) {
+      assertThrows(BuildFailedException.class, () -> buildTarget("//foo:analysis_failure"));
+
+    } else {
+      assertThrows(ViewCreationFailedException.class, () -> buildTarget("//foo:analysis_failure"));
+    }
+    events.assertContainsError(
+        "in deps attribute of my_rule rule //foo:analysis_failure: rule '//foo:missing' does not"
+            + " exist");
+    events.clear();
+
+    // Null build
+    if (keepGoing) {
+      assertThrows(BuildFailedException.class, () -> buildTarget("//foo:analysis_failure"));
+
+    } else {
+      assertThrows(ViewCreationFailedException.class, () -> buildTarget("//foo:analysis_failure"));
+    }
+    events.assertContainsError(
+        "in deps attribute of my_rule rule //foo:analysis_failure: rule '//foo:missing' does not"
+            + " exist");
+  }
+
+  // Regression test for b/300391729.
+  @Test
+  public void executionFailure_keepGoing_doesNotSpamWarnings() throws Exception {
+    addOptions("--keep_going");
+    writeExecutionFailureAspectBzl();
+    write(
+        "foo/BUILD",
+        "cc_library(name = 'foo', srcs = ['foo.cc'], deps = [':bar'])",
+        "cc_library(name = 'bar', srcs = ['bar.cc'])");
+    write("foo/foo.cc");
+    write("foo/bar.cc");
+    addOptions("--aspects=//foo:aspect.bzl%execution_err_aspect", "--output_groups=files");
+
+    assertThrows(BuildFailedException.class, () -> buildTarget("//foo/..."));
+    // No warnings.
+    events.assertNoWarnings();
+  }
+
+  // Regression test for b/301289073.
+  @Test
+  public void conflictCheck_doesNotTimeout() throws Exception {
+    addOptions("--keep_going");
+    write(
+        "foo/BUILD",
+        "BASE_SIZE = 500",
+        "TOP_SIZE = 100",
+        "genrule(",
+        "    name = 'base_0',",
+        "    outs = ['base_0.txt'],",
+        "    cmd = 'touch $@',",
+        ")",
+        "[genrule(",
+        "    name = 'base_%s' % x,",
+        "    srcs = ['base_%s.txt' % (x - 1)],",
+        "    outs = ['base_%s.txt' % x],",
+        "    cmd = 'touch $@',",
+        ") for x in range(1, BASE_SIZE)]",
+        "[genrule(",
+        "    name = 'level_%s' % y,",
+        "    srcs = ['base_%s.txt' % (",
+        "        x,",
+        "    ) for x in range(0, BASE_SIZE)],",
+        "    outs = ['level_%s.txt' % y],",
+        "    cmd = 'touch $@',",
+        ") for y in range(0, TOP_SIZE)]",
+        "genrule(",
+        "    name = 'conflict',",
+        "    outs = ['conflict'],",
+        "    cmd = 'touch $@',",
+        ")");
+    write(
+        "foo/conflict/BUILD",
+        "genrule(",
+        "    name = 'conflict',",
+        "    outs = ['conflict'],",
+        "    cmd = 'touch $@',",
+        ")");
+
+    // Building a set of targets with recursive dependencies that would trivially finish in time
+    // with memoization and time out without.
+    assertThrows(BuildFailedException.class, () -> buildTarget("//foo/..."));
+    events.assertContainsError("is a prefix of the other");
+  }
+
   private void assertSingleAnalysisPhaseCompleteEventWithLabels(String... labels) {
-    assertThat(analysisEventsSubscriber.getAnalysisPhaseCompleteEvents()).hasSize(1);
+    assertThat(eventsSubscriber.getAnalysisPhaseCompleteEvents()).hasSize(1);
     AnalysisPhaseCompleteEvent analysisPhaseCompleteEvent =
-        Iterables.getOnlyElement(analysisEventsSubscriber.getAnalysisPhaseCompleteEvents());
+        Iterables.getOnlyElement(eventsSubscriber.getAnalysisPhaseCompleteEvents());
     assertThat(analysisPhaseCompleteEvent.getTimeInMs()).isGreaterThan(0);
     assertThat(getLabelsOfAnalyzedTargets(analysisPhaseCompleteEvent))
         .containsExactlyElementsIn(labels);
@@ -485,15 +761,24 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
         .collect(toImmutableSet());
   }
 
-  private static final class AnalysisEventsSubscriber {
+  private RecordingOutErr divertInfoLogToOutErr() {
+    // Divert output into recorder:
+    RecordingOutErr recordedOutput = new RecordingOutErr();
+    this.outErr = recordedOutput;
+    divertLogging(
+        Level.INFO, outErr, ImmutableList.of(Logger.getLogger(SkymeldModule.class.getName())));
+    return recordedOutput;
+  }
 
-    private final Set<TopLevelEntityAnalysisConcludedEvent> topLevelEntityAnalysisConcludedEvents =
-        Sets.newConcurrentHashSet();
+  private static final class EventsSubscriber {
 
-    private final Set<AnalysisPhaseCompleteEvent> analysisPhaseCompleteEvents =
-        Sets.newConcurrentHashSet();
+    private final List<TopLevelEntityAnalysisConcludedEvent> topLevelEntityAnalysisConcludedEvents =
+        Collections.synchronizedList(new ArrayList<>());
 
-    AnalysisEventsSubscriber() {}
+    private final List<AnalysisPhaseCompleteEvent> analysisPhaseCompleteEvents =
+        Collections.synchronizedList(new ArrayList<>());
+
+    EventsSubscriber() {}
 
     @Subscribe
     void recordTopLevelEntityAnalysisConcludedEvent(TopLevelEntityAnalysisConcludedEvent event) {
@@ -505,11 +790,11 @@ public class SkymeldBuildIntegrationTest extends BuildIntegrationTestCase {
       analysisPhaseCompleteEvents.add(event);
     }
 
-    public Set<TopLevelEntityAnalysisConcludedEvent> getTopLevelEntityAnalysisConcludedEvents() {
+    public List<TopLevelEntityAnalysisConcludedEvent> getTopLevelEntityAnalysisConcludedEvents() {
       return topLevelEntityAnalysisConcludedEvents;
     }
 
-    public Set<AnalysisPhaseCompleteEvent> getAnalysisPhaseCompleteEvents() {
+    public List<AnalysisPhaseCompleteEvent> getAnalysisPhaseCompleteEvents() {
       return analysisPhaseCompleteEvents;
     }
   }

@@ -18,11 +18,14 @@ import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 
 import build.bazel.remote.execution.v2.ActionResult;
+import build.bazel.remote.execution.v2.CacheCapabilities;
 import build.bazel.remote.execution.v2.Digest;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.devtools.build.lib.remote.Store;
+import com.google.devtools.build.lib.remote.common.CacheNotFoundException;
 import com.google.devtools.build.lib.remote.common.LazyFileOutputStream;
 import com.google.devtools.build.lib.remote.common.RemoteActionExecutionContext;
 import com.google.devtools.build.lib.remote.common.RemoteCacheClient;
@@ -30,7 +33,7 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.protobuf.ByteString;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.util.UUID;
+import java.util.Set;
 
 /**
  * A {@link RemoteCacheClient} implementation combining two blob stores. A local disk blob store and
@@ -132,18 +135,23 @@ public final class DiskAndRemoteCacheClient implements RemoteCacheClient {
             directExecutor());
   }
 
-  private Path newTempPath() {
-    return diskCache.toPathNoSplit(UUID.randomUUID().toString());
+  private Path getTempPath() {
+    return diskCache.getTempPath();
   }
 
-  private static ListenableFuture<Void> closeStreamOnError(
-      ListenableFuture<Void> f, OutputStream out) {
+  private static ListenableFuture<Void> cleanupTempFileOnError(
+      ListenableFuture<Void> f, Path tempPath, OutputStream tempOut) {
     return Futures.catchingAsync(
         f,
         Exception.class,
         (rootCause) -> {
           try {
-            out.close();
+            tempOut.close();
+          } catch (IOException e) {
+            rootCause.addSuppressed(e);
+          }
+          try {
+            tempPath.delete();
           } catch (IOException e) {
             rootCause.addSuppressed(e);
           }
@@ -155,23 +163,35 @@ public final class DiskAndRemoteCacheClient implements RemoteCacheClient {
   @Override
   public ListenableFuture<Void> downloadBlob(
       RemoteActionExecutionContext context, Digest digest, OutputStream out) {
-    if (context.getReadCachePolicy().allowDiskCache() && diskCache.contains(digest)) {
-      return diskCache.downloadBlob(context, digest, out);
+    if (context.getReadCachePolicy().allowDiskCache()) {
+      return Futures.catchingAsync(
+          diskCache.downloadBlob(context, digest, out),
+          CacheNotFoundException.class,
+          (unused) -> downloadBlobFromRemote(context, digest, out),
+          directExecutor());
+    } else {
+      return downloadBlobFromRemote(context, digest, out);
     }
+  }
 
-    Path tempPath = newTempPath();
-    final OutputStream tempOut;
-    tempOut = new LazyFileOutputStream(tempPath);
-
+  private ListenableFuture<Void> downloadBlobFromRemote(
+      RemoteActionExecutionContext context, Digest digest, OutputStream out) {
     if (context.getReadCachePolicy().allowRemoteCache()) {
+      Path tempPath = getTempPath();
+      LazyFileOutputStream tempOut = new LazyFileOutputStream(tempPath);
+
       ListenableFuture<Void> download =
-          closeStreamOnError(remoteCache.downloadBlob(context, digest, tempOut), tempOut);
+          cleanupTempFileOnError(
+              remoteCache.downloadBlob(context, digest, tempOut), tempPath, tempOut);
       return Futures.transformAsync(
           download,
           (unused) -> {
             try {
+              // Fsync temp before we rename it to avoid data loss in the case of machine
+              // crashes (the OS may reorder the writes and the rename).
+              tempOut.syncIfPossible();
               tempOut.close();
-              diskCache.captureFile(tempPath, digest, /* isActionCache= */ false);
+              diskCache.captureFile(tempPath, digest, Store.CAS);
             } catch (IOException e) {
               return immediateFailedFuture(e);
             }
@@ -183,31 +203,70 @@ public final class DiskAndRemoteCacheClient implements RemoteCacheClient {
     }
   }
 
+  private ListenableFuture<CachedActionResult> downloadActionResultFromRemote(
+      RemoteActionExecutionContext context,
+      ActionKey actionKey,
+      boolean inlineOutErr,
+      Set<String> inlineOutputFiles) {
+    return Futures.transformAsync(
+        remoteCache.downloadActionResult(context, actionKey, inlineOutErr, inlineOutputFiles),
+        (cachedActionResult) -> {
+          if (cachedActionResult == null) {
+            return immediateFuture(null);
+          } else {
+            return Futures.transform(
+                diskCache.uploadActionResult(context, actionKey, cachedActionResult.actionResult()),
+                v -> cachedActionResult,
+                directExecutor());
+          }
+        },
+        directExecutor());
+  }
+
+  @Override
+  public CacheCapabilities getCacheCapabilities() throws IOException {
+    return remoteCache.getCacheCapabilities();
+  }
+
+  @Override
+  public ListenableFuture<String> getAuthority() {
+    return remoteCache.getAuthority();
+  }
+
   @Override
   public ListenableFuture<CachedActionResult> downloadActionResult(
-      RemoteActionExecutionContext context, ActionKey actionKey, boolean inlineOutErr) {
-    if (context.getReadCachePolicy().allowDiskCache()
-        && diskCache.containsActionResult(actionKey)) {
-      return diskCache.downloadActionResult(context, actionKey, inlineOutErr);
+      RemoteActionExecutionContext context,
+      ActionKey actionKey,
+      boolean inlineOutErr,
+      Set<String> inlineOutputFiles) {
+    ListenableFuture<CachedActionResult> future = immediateFuture(null);
+
+    if (context.getReadCachePolicy().allowDiskCache()) {
+      // If Build without the Bytes is enabled, the future will likely return null
+      // and fallback to remote cache because AC integrity check is enabled and referenced blobs are
+      // probably missing from disk cache due to BwoB.
+      //
+      // TODO(chiwang): With lease service, instead of doing the integrity check against local
+      // filesystem, we can check whether referenced blobs are alive in the lease service to
+      // increase the cache-hit rate for disk cache.
+      future = diskCache.downloadActionResult(context, actionKey, inlineOutErr, inlineOutputFiles);
     }
 
     if (context.getReadCachePolicy().allowRemoteCache()) {
-      return Futures.transformAsync(
-          remoteCache.downloadActionResult(context, actionKey, inlineOutErr),
-          (cachedActionResult) -> {
-            if (cachedActionResult == null) {
-              return immediateFuture(null);
-            } else {
-              return Futures.transform(
-                  diskCache.uploadActionResult(
-                      context, actionKey, cachedActionResult.actionResult()),
-                  v -> cachedActionResult,
-                  directExecutor());
-            }
-          },
-          directExecutor());
-    } else {
-      return immediateFuture(null);
+      future =
+          Futures.transformAsync(
+              future,
+              (result) -> {
+                if (result == null) {
+                  return downloadActionResultFromRemote(
+                      context, actionKey, inlineOutErr, inlineOutputFiles);
+                } else {
+                  return immediateFuture(result);
+                }
+              },
+              directExecutor());
     }
+
+    return future;
   }
 }

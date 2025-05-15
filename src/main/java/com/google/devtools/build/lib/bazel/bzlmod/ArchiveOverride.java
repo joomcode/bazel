@@ -17,7 +17,8 @@ package com.google.devtools.build.lib.bazel.bzlmod;
 
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.cmdline.RepositoryName;
+import com.google.devtools.build.lib.bazel.bzlmod.BazelModuleInspectorValue.AugmentedModule.ResolutionReason;
+import com.google.devtools.build.lib.cmdline.Label;
 
 /** Specifies that a module should be retrieved from an archive. */
 @AutoValue
@@ -25,18 +26,23 @@ public abstract class ArchiveOverride implements NonRegistryOverride {
 
   public static ArchiveOverride create(
       ImmutableList<String> urls,
-      ImmutableList<String> patches,
+      ImmutableList<Label> patches,
+      ImmutableList<String> patchCmds,
       String integrity,
       String stripPrefix,
       int patchStrip) {
-    return new AutoValue_ArchiveOverride(urls, patches, integrity, stripPrefix, patchStrip);
+    return new AutoValue_ArchiveOverride(
+        urls, patches, patchCmds, integrity, stripPrefix, patchStrip);
   }
 
   /** The URLs pointing at the archives. Can be HTTP(S) or file URLs. */
   public abstract ImmutableList<String> getUrls();
 
-  /** The patches to apply after extracting the archive. Should be a list of labels. */
-  public abstract ImmutableList<String> getPatches();
+  /** The labels of patches to apply after extracting the archive. */
+  public abstract ImmutableList<Label> getPatches();
+
+  /** The patch commands to execute after extracting the archive. Should be a list of commands. */
+  public abstract ImmutableList<String> getPatchCmds();
 
   /** The subresource integirty metadata of the archive. */
   public abstract String getIntegrity();
@@ -49,14 +55,19 @@ public abstract class ArchiveOverride implements NonRegistryOverride {
 
   /** Returns the {@link RepoSpec} that defines this repository. */
   @Override
-  public RepoSpec getRepoSpec(RepositoryName repoName) {
+  public RepoSpec getRepoSpec() {
     return new ArchiveRepoSpecBuilder()
-        .setRepoName(repoName.getName())
         .setUrls(getUrls())
         .setIntegrity(getIntegrity())
         .setStripPrefix(getStripPrefix())
         .setPatches(getPatches())
+        .setPatchCmds(getPatchCmds())
         .setPatchStrip(getPatchStrip())
         .build();
+  }
+
+  @Override
+  public ResolutionReason getResolutionReason() {
+    return ResolutionReason.ARCHIVE_OVERRIDE;
   }
 }

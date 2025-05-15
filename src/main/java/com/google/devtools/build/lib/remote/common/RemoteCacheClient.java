@@ -16,13 +16,16 @@ package com.google.devtools.build.lib.remote.common;
 
 import build.bazel.remote.execution.v2.Action;
 import build.bazel.remote.execution.v2.ActionResult;
+import build.bazel.remote.execution.v2.CacheCapabilities;
 import build.bazel.remote.execution.v2.Digest;
 import com.google.auto.value.AutoValue;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.protobuf.ByteString;
+import java.io.IOException;
 import java.io.OutputStream;
+import java.util.Set;
 import javax.annotation.Nullable;
 
 /**
@@ -31,6 +34,9 @@ import javax.annotation.Nullable;
  * <p>Implementations must be thread-safe.
  */
 public interface RemoteCacheClient extends MissingDigestsFinder {
+  CacheCapabilities getCacheCapabilities() throws IOException;
+
+  ListenableFuture<String> getAuthority();
 
   /**
    * A key in the remote action cache. The type wraps around a {@link Digest} of an {@link Action}.
@@ -99,11 +105,16 @@ public interface RemoteCacheClient extends MissingDigestsFinder {
    * @param actionKey The digest of the {@link Action} that generated the action result.
    * @param inlineOutErr A hint to the server to inline the stdout and stderr in the {@code
    *     ActionResult} message.
+   * @param inlineOutputFiles A hint to the server to inline the specified output files in the
+   *     {@code ActionResult} message.
    * @return A Future representing pending download of an action result. If an action result for
    *     {@code actionKey} cannot be found the result of the Future is {@code null}.
    */
   ListenableFuture<CachedActionResult> downloadActionResult(
-      RemoteActionExecutionContext context, ActionKey actionKey, boolean inlineOutErr);
+      RemoteActionExecutionContext context,
+      ActionKey actionKey,
+      boolean inlineOutErr,
+      Set<String> inlineOutputFiles);
 
   /**
    * Uploads an action result for the {@code actionKey}.

@@ -19,11 +19,11 @@ import static com.google.common.base.Preconditions.checkState;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.analysis.platform.PlatformInfo;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
+import java.util.Collection;
 import java.util.Set;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.Immutable;
@@ -39,9 +39,10 @@ public final class SimpleSpawn implements Spawn {
   private final NestedSet<? extends ActionInput> tools;
   private final RunfilesSupplier runfilesSupplier;
   private final ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> filesetMappings;
-  private final ImmutableList<? extends ActionInput> outputs;
+  private final ImmutableList<ActionInput> outputs;
   // If null, all outputs are mandatory.
   @Nullable private final Set<? extends ActionInput> mandatoryOutputs;
+  private final PathMapper pathMapper;
   private final LocalResourcesSupplier localResourcesSupplier;
   private ResourceSet localResourcesCached;
 
@@ -54,10 +55,11 @@ public final class SimpleSpawn implements Spawn {
       ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> filesetMappings,
       NestedSet<? extends ActionInput> inputs,
       NestedSet<? extends ActionInput> tools,
-      ImmutableSet<? extends ActionInput> outputs,
+      Collection<? extends ActionInput> outputs,
       @Nullable final Set<? extends ActionInput> mandatoryOutputs,
       @Nullable ResourceSet localResources,
-      @Nullable LocalResourcesSupplier localResourcesSupplier) {
+      @Nullable LocalResourcesSupplier localResourcesSupplier,
+      PathMapper pathMapper) {
     this.owner = Preconditions.checkNotNull(owner);
     this.arguments = Preconditions.checkNotNull(arguments);
     this.environment = Preconditions.checkNotNull(environment);
@@ -67,7 +69,7 @@ public final class SimpleSpawn implements Spawn {
     this.runfilesSupplier =
         runfilesSupplier == null ? EmptyRunfilesSupplier.INSTANCE : runfilesSupplier;
     this.filesetMappings = filesetMappings;
-    this.outputs = Preconditions.checkNotNull(outputs).asList();
+    this.outputs = ImmutableList.copyOf(outputs);
     this.mandatoryOutputs = mandatoryOutputs;
     checkState(
         (localResourcesSupplier == null) != (localResources == null),
@@ -81,6 +83,7 @@ public final class SimpleSpawn implements Spawn {
       this.localResourcesSupplier = localResourcesSupplier;
       this.localResourcesCached = null;
     }
+    this.pathMapper = pathMapper;
   }
 
   public SimpleSpawn(
@@ -92,7 +95,7 @@ public final class SimpleSpawn implements Spawn {
       ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> filesetMappings,
       NestedSet<? extends ActionInput> inputs,
       NestedSet<? extends ActionInput> tools,
-      ImmutableSet<? extends ActionInput> outputs,
+      Collection<? extends ActionInput> outputs,
       @Nullable Set<? extends ActionInput> mandatoryOutputs,
       ResourceSet localResources) {
     this(
@@ -107,7 +110,8 @@ public final class SimpleSpawn implements Spawn {
         outputs,
         mandatoryOutputs,
         localResources,
-        /*localResourcesSupplier=*/ null);
+        /* localResourcesSupplier= */ null,
+        PathMapper.NOOP);
   }
 
   @SuppressWarnings("TooManyParameters")
@@ -120,7 +124,7 @@ public final class SimpleSpawn implements Spawn {
       ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> filesetMappings,
       NestedSet<? extends ActionInput> inputs,
       NestedSet<? extends ActionInput> tools,
-      ImmutableSet<? extends ActionInput> outputs,
+      Collection<? extends ActionInput> outputs,
       @Nullable Set<? extends ActionInput> mandatoryOutputs,
       LocalResourcesSupplier localResourcesSupplier) {
     this(
@@ -134,8 +138,92 @@ public final class SimpleSpawn implements Spawn {
         tools,
         outputs,
         mandatoryOutputs,
-        /*localResources=*/ null,
-        localResourcesSupplier);
+        /* localResources= */ null,
+        localResourcesSupplier,
+        PathMapper.NOOP);
+  }
+
+  public SimpleSpawn(
+      ActionExecutionMetadata owner,
+      ImmutableList<String> arguments,
+      ImmutableMap<String, String> environment,
+      ImmutableMap<String, String> executionInfo,
+      RunfilesSupplier runfilesSupplier,
+      ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> filesetMappings,
+      NestedSet<? extends ActionInput> inputs,
+      NestedSet<? extends ActionInput> tools,
+      Collection<? extends ActionInput> outputs,
+      @Nullable Set<? extends ActionInput> mandatoryOutputs,
+      LocalResourcesSupplier localResourcesSupplier,
+      PathMapper pathMapper) {
+    this(
+        owner,
+        arguments,
+        environment,
+        executionInfo,
+        runfilesSupplier,
+        filesetMappings,
+        inputs,
+        tools,
+        outputs,
+        mandatoryOutputs,
+        /* localResources= */ null,
+        localResourcesSupplier,
+        pathMapper);
+  }
+
+  public SimpleSpawn(
+      ActionExecutionMetadata owner,
+      ImmutableList<String> arguments,
+      ImmutableMap<String, String> environment,
+      ImmutableMap<String, String> executionInfo,
+      RunfilesSupplier runfilesSupplier,
+      ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> filesetMappings,
+      NestedSet<? extends ActionInput> inputs,
+      NestedSet<? extends ActionInput> tools,
+      Collection<? extends ActionInput> outputs,
+      @Nullable Set<? extends ActionInput> mandatoryOutputs,
+      ResourceSet localResources,
+      PathMapper pathMapper) {
+    this(
+        owner,
+        arguments,
+        environment,
+        executionInfo,
+        runfilesSupplier,
+        filesetMappings,
+        inputs,
+        tools,
+        outputs,
+        mandatoryOutputs,
+        localResources,
+        /* localResourcesSupplier= */ null,
+        pathMapper);
+  }
+
+  public SimpleSpawn(
+      ActionExecutionMetadata owner,
+      ImmutableList<String> arguments,
+      ImmutableMap<String, String> environment,
+      ImmutableMap<String, String> executionInfo,
+      RunfilesSupplier runfilesSupplier,
+      NestedSet<? extends ActionInput> inputs,
+      Collection<? extends ActionInput> outputs,
+      ResourceSet localResources) {
+    this(
+        owner,
+        arguments,
+        environment,
+        executionInfo,
+        runfilesSupplier,
+        /* filesetMappings= */ ImmutableMap.of(),
+        inputs,
+        /* tools= */ NestedSetBuilder.emptySet(Order.STABLE_ORDER),
+        outputs,
+        /* mandatoryOutputs= */ null,
+        localResources,
+        /* localResourcesSupplier= */ null,
+        PathMapper.NOOP);
   }
 
   public SimpleSpawn(
@@ -144,7 +232,7 @@ public final class SimpleSpawn implements Spawn {
       ImmutableMap<String, String> environment,
       ImmutableMap<String, String> executionInfo,
       NestedSet<? extends ActionInput> inputs,
-      ImmutableSet<? extends ActionInput> outputs,
+      Collection<Artifact> outputs,
       LocalResourcesSupplier localResourcesSupplier) {
     this(
         owner,
@@ -166,7 +254,7 @@ public final class SimpleSpawn implements Spawn {
       ImmutableMap<String, String> environment,
       ImmutableMap<String, String> executionInfo,
       NestedSet<? extends ActionInput> inputs,
-      ImmutableSet<? extends ActionInput> outputs,
+      Collection<? extends ActionInput> outputs,
       ResourceSet resourceSet) {
     this(
         owner,
@@ -218,7 +306,7 @@ public final class SimpleSpawn implements Spawn {
   }
 
   @Override
-  public ImmutableList<? extends ActionInput> getOutputFiles() {
+  public ImmutableList<ActionInput> getOutputFiles() {
     return outputs;
   }
 
@@ -239,6 +327,11 @@ public final class SimpleSpawn implements Spawn {
       localResourcesCached = localResourcesSupplier.get();
     }
     return localResourcesCached;
+  }
+
+  @Override
+  public PathMapper getPathMapper() {
+    return pathMapper;
   }
 
   @Override

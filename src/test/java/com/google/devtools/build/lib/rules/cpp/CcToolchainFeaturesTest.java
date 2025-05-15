@@ -21,18 +21,19 @@ import com.google.common.base.Joiner;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableClassToInstanceMap;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Multimap;
+import com.google.common.collect.ListMultimap;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.actions.ArtifactRoot.RootType;
+import com.google.devtools.build.lib.actions.PathMapper;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.ActionConfig;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.ExpansionException;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
-import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.IntegerValue;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.LibraryToLinkValue;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.SequenceBuilder;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.StringSequenceBuilder;
@@ -48,9 +49,7 @@ import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain;
 import com.google.protobuf.TextFormat;
 import java.io.IOException;
-import java.util.Collection;
 import java.util.List;
-import java.util.Map;
 import net.starlark.java.eval.EvalException;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -58,7 +57,7 @@ import org.junit.runners.JUnit4;
 
 /** Tests for toolchain features. */
 @RunWith(JUnit4.class)
-public class CcToolchainFeaturesTest extends BuildViewTestCase {
+public final class CcToolchainFeaturesTest extends BuildViewTestCase {
 
   /**
    * Creates a {@code Variables} configuration from a list of key/value pairs.
@@ -71,15 +70,15 @@ public class CcToolchainFeaturesTest extends BuildViewTestCase {
       throw new IllegalArgumentException(
           "createVariables takes an even number of arguments (key/value pairs)");
     }
-    Multimap<String, String> entryMap = ArrayListMultimap.create();
+    ListMultimap<String, String> entryMap = ArrayListMultimap.create();
     for (int i = 0; i < entries.length; i += 2) {
       entryMap.put(entries[i], entries[i + 1]);
     }
     CcToolchainVariables.Builder variables = CcToolchainVariables.builder();
     for (String name : entryMap.keySet()) {
-      Collection<String> value = entryMap.get(name);
+      List<String> value = entryMap.get(name);
       if (value.size() == 1) {
-        variables.addStringVariable(name, value.iterator().next());
+        variables.addStringVariable(name, value.get(0));
       } else {
         variables.addStringSequenceVariable(name, ImmutableList.copyOf(value));
       }
@@ -290,8 +289,9 @@ public class CcToolchainFeaturesTest extends BuildViewTestCase {
                 "feature { name: 'f' }",
                 "feature { name: 'g' }")
             .getFeatureConfiguration(ImmutableSet.of("a", "b", "d", "f"));
-    Map<String, String> env =
-        configuration.getEnvironmentVariables(CppActionNames.CPP_COMPILE, createVariables());
+    ImmutableMap<String, String> env =
+        configuration.getEnvironmentVariables(
+            CppActionNames.CPP_COMPILE, createVariables(), PathMapper.NOOP);
     assertThat(env)
         .containsExactly(
             "foo", "bar", "cat", "meow", "dog", "woof",
@@ -300,6 +300,67 @@ public class CcToolchainFeaturesTest extends BuildViewTestCase {
     assertThat(env).doesNotContainEntry("withoutFeature", "value2");
     assertThat(env).doesNotContainEntry("withNotFeature", "value3");
     assertThat(env).doesNotContainEntry("doNotInclude", "doNotIncludePlease");
+  }
+
+  @Test
+  public void testEnvVarsWithMissingVariableIsNotExpanded() throws Exception {
+    FeatureConfiguration configuration =
+        CcToolchainTestHelper.buildFeatures(
+                "feature {",
+                "  name: 'a'",
+                "  env_set {",
+                "     action: 'c++-compile'",
+                "     env_entry { key: 'foo', value: 'bar', expand_if_all_available: 'v' }",
+                "  }",
+                "}")
+            .getFeatureConfiguration(ImmutableSet.of("a"));
+
+    ImmutableMap<String, String> env =
+        configuration.getEnvironmentVariables(
+            CppActionNames.CPP_COMPILE, createVariables(), PathMapper.NOOP);
+
+    assertThat(env).doesNotContainEntry("foo", "bar");
+  }
+
+  @Test
+  public void testEnvVarsWithAllVariablesPresentAreExpanded() throws Exception {
+    FeatureConfiguration configuration =
+        CcToolchainTestHelper.buildFeatures(
+                "feature {",
+                "  name: 'a'",
+                "  env_set {",
+                "     action: 'c++-compile'",
+                "     env_entry { key: 'foo', value: 'bar', expand_if_all_available: 'v' }",
+                "  }",
+                "}")
+            .getFeatureConfiguration(ImmutableSet.of("a"));
+
+    ImmutableMap<String, String> env =
+        configuration.getEnvironmentVariables(
+            CppActionNames.CPP_COMPILE, createVariables("v", "1"), PathMapper.NOOP);
+
+    assertThat(env).containsExactly("foo", "bar").inOrder();
+  }
+
+  @Test
+  public void testEnvVarsWithAllVariablesPresentAreExpandedWithVariableExpansion()
+      throws Exception {
+    FeatureConfiguration configuration =
+        CcToolchainTestHelper.buildFeatures(
+                "feature {",
+                "  name: 'a'",
+                "  env_set {",
+                "     action: 'c++-compile'",
+                "     env_entry { key: 'foo', value: '%{v}', expand_if_all_available: 'v' }",
+                "  }",
+                "}")
+            .getFeatureConfiguration(ImmutableSet.of("a"));
+
+    ImmutableMap<String, String> env =
+        configuration.getEnvironmentVariables(
+            CppActionNames.CPP_COMPILE, createVariables("v", "1"), PathMapper.NOOP);
+
+    assertThat(env).containsExactly("foo", "1").inOrder();
   }
 
   private static String getExpansionOfFlag(String value) throws Exception {
@@ -689,7 +750,7 @@ public class CcToolchainFeaturesTest extends BuildViewTestCase {
                 createStructureVariables(
                     "struct",
                     new CcToolchainVariables.StructureBuilder()
-                        .addField("bool", new IntegerValue(1))
+                        .addField("bool", booleanValue(true))
                         .addField("foo", "fooValue")
                         .addField("bar", "barValue"))))
         .containsExactly("-AfooValue", "-BbarValue");
@@ -712,29 +773,33 @@ public class CcToolchainFeaturesTest extends BuildViewTestCase {
                 createStructureVariables(
                     "struct",
                     new CcToolchainVariables.StructureBuilder()
-                        .addField("bool", new IntegerValue(0))
+                        .addField("bool", booleanValue(false))
                         .addField("foo", "fooValue")
                         .addField("bar", "barValue"))))
         .containsExactly("-XfooValue", "-YbarValue");
   }
 
+  private static VariableValue booleanValue(boolean val) throws ExpansionException {
+    return CcToolchainVariables.builder().addBooleanValue("name", val).build().getVariable("name");
+  }
+
   @Test
   public void testExpandIfEqual() throws Exception {
     assertThat(
-        getCommandLineForFlagGroups(
-            "flag_group {"
-                + "  expand_if_equal: { variable: 'var' value: 'equal_value' }"
-                + "  flag: '-foo_%{var}'"
-                + "}"
-                + "flag_group {"
-                + "  expand_if_equal: { variable: 'var' value: 'non_equal_value' }"
-                + "  flag: '-bar_%{var}'"
-                + "}"
-                + "flag_group {"
-                + "  expand_if_equal: { variable: 'non_existing_var' value: 'non_existing' }"
-                + "  flag: '-baz_%{non_existing_var}'"
-                + "}",
-            createVariables("var", "equal_value")))
+            getCommandLineForFlagGroups(
+                "flag_group {"
+                    + "  expand_if_equal: { variable: 'var' value: 'equal_value' }"
+                    + "  flag: '-foo_%{var}'"
+                    + "}"
+                    + "flag_group {"
+                    + "  expand_if_equal: { variable: 'var' value: 'non_equal_value' }"
+                    + "  flag: '-bar_%{var}'"
+                    + "}"
+                    + "flag_group {"
+                    + "  expand_if_equal: { variable: 'non_existing_var' value: 'non_existing' }"
+                    + "  flag: '-baz_%{non_existing_var}'"
+                    + "}",
+                createVariables("var", "equal_value")))
         .containsExactly("-foo_equal_value");
   }
 
@@ -1666,7 +1731,7 @@ public class CcToolchainFeaturesTest extends BuildViewTestCase {
     assertThat(
             LibraryToLinkValue.forDynamicLibrary("foo")
                 .getFieldValue("LibraryToLinkValue", LibraryToLinkValue.NAME_FIELD_NAME)
-                .getStringValue(LibraryToLinkValue.NAME_FIELD_NAME))
+                .getStringValue(LibraryToLinkValue.NAME_FIELD_NAME, PathMapper.NOOP))
         .isEqualTo("foo");
     assertThat(
             LibraryToLinkValue.forDynamicLibrary("foo")
@@ -1683,10 +1748,10 @@ public class CcToolchainFeaturesTest extends BuildViewTestCase {
     Iterable<? extends VariableValue> objects =
         LibraryToLinkValue.forObjectFileGroup(testArtifacts, false)
             .getFieldValue("LibraryToLinkValue", LibraryToLinkValue.OBJECT_FILES_FIELD_NAME)
-            .getSequenceValue(LibraryToLinkValue.OBJECT_FILES_FIELD_NAME);
+            .getSequenceValue(LibraryToLinkValue.OBJECT_FILES_FIELD_NAME, PathMapper.NOOP);
     ImmutableList.Builder<String> objectNames = ImmutableList.builder();
     for (VariableValue object : objects) {
-      objectNames.add(object.getStringValue("name"));
+      objectNames.add(object.getStringValue("name", PathMapper.NOOP));
     }
     assertThat(objectNames.build())
         .containsExactlyElementsIn(Iterables.transform(testArtifacts, Artifact::getExecPathString));

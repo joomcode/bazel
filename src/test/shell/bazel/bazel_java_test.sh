@@ -57,34 +57,31 @@ fi
 
 JAVA_TOOLCHAIN="@bazel_tools//tools/jdk:toolchain"
 
+JAVA_TOOLCHAIN_TYPE="@bazel_tools//tools/jdk:toolchain_type"
+
+RULES_JAVA_REPO_NAME=$(cat "$(rlocation io_bazel/src/test/shell/bazel/RULES_JAVA_REPO_NAME)")
+JAVA_TOOLS_REPO_PREFIX="${RULES_JAVA_REPO_NAME}~toolchains~"
+
 JAVA_TOOLS_ZIP="$1"; shift
 if [[ "${JAVA_TOOLS_ZIP}" != "released" ]]; then
-  if [[ "${JAVA_TOOLS_ZIP}" == file* ]]; then
-    JAVA_TOOLS_ZIP_FILE_URL="${JAVA_TOOLS_ZIP}"
-  elif "$is_windows"; then
-    JAVA_TOOLS_ZIP_FILE_URL="file:///$(rlocation io_bazel/$JAVA_TOOLS_ZIP)"
-  else
-    JAVA_TOOLS_ZIP_FILE_URL="file://$(rlocation io_bazel/$JAVA_TOOLS_ZIP)"
-  fi
+  JAVA_TOOLS_ZIP_FILE="$(rlocation "${JAVA_TOOLS_ZIP}")"
+  JAVA_TOOLS_DIR="$TEST_TMPDIR/_java_tools"
+  unzip -q "${JAVA_TOOLS_ZIP_FILE}" -d "$JAVA_TOOLS_DIR"
+  touch "$JAVA_TOOLS_DIR/WORKSPACE"
+  add_to_bazelrc "build --override_repository=${JAVA_TOOLS_REPO_PREFIX}remote_java_tools=${JAVA_TOOLS_DIR}"
 fi
-JAVA_TOOLS_ZIP_FILE_URL=${JAVA_TOOLS_ZIP_FILE_URL:-}
 
 JAVA_TOOLS_PREBUILT_ZIP="$1"; shift
 if [[ "${JAVA_TOOLS_PREBUILT_ZIP}" != "released" ]]; then
-  if [[ "${JAVA_TOOLS_PREBUILT_ZIP}" == file* ]]; then
-    JAVA_TOOLS_PREBUILT_ZIP_FILE_URL="${JAVA_TOOLS_PREBUILT_ZIP}"
-  elif "$is_windows"; then
-    JAVA_TOOLS_PREBUILT_ZIP_FILE_URL="file:///$(rlocation io_bazel/$JAVA_TOOLS_PREBUILT_ZIP)"
-  else
-    JAVA_TOOLS_PREBUILT_ZIP_FILE_URL="file://$(rlocation io_bazel/$JAVA_TOOLS_PREBUILT_ZIP)"
-  fi
-  # Remove the repo overrides that are set up for some Bazel CI workers.
-  inplace-sed "/override_repository=remote_java_tools=/d" "$TEST_TMPDIR/bazelrc"
-  inplace-sed "/override_repository=remote_java_tools_linux=/d" "$TEST_TMPDIR/bazelrc"
-  inplace-sed "/override_repository=remote_java_tools_windows=/d" "$TEST_TMPDIR/bazelrc"
-  inplace-sed "/override_repository=remote_java_tools_darwin=/d" "$TEST_TMPDIR/bazelrc"
+  JAVA_TOOLS_PREBUILT_ZIP_FILE="$(rlocation "${JAVA_TOOLS_PREBUILT_ZIP}")"
+  JAVA_TOOLS_PREBUILT_DIR="$TEST_TMPDIR/_java_tools_prebuilt"
+  unzip -q "${JAVA_TOOLS_PREBUILT_ZIP_FILE}" -d "$JAVA_TOOLS_PREBUILT_DIR"
+  touch "$JAVA_TOOLS_PREBUILT_DIR/WORKSPACE"
+  add_to_bazelrc "build --override_repository=${JAVA_TOOLS_REPO_PREFIX}remote_java_tools_linux=${JAVA_TOOLS_PREBUILT_DIR}"
+  add_to_bazelrc "build --override_repository=${JAVA_TOOLS_REPO_PREFIX}remote_java_tools_windows=${JAVA_TOOLS_PREBUILT_DIR}"
+  add_to_bazelrc "build --override_repository=${JAVA_TOOLS_REPO_PREFIX}remote_java_tools_darwin_x86_64=${JAVA_TOOLS_PREBUILT_DIR}"
+  add_to_bazelrc "build --override_repository=${JAVA_TOOLS_REPO_PREFIX}remote_java_tools_arm64=${JAVA_TOOLS_PREBUILT_DIR}"
 fi
-JAVA_TOOLS_PREBUILT_ZIP_FILE_URL=${JAVA_TOOLS_PREBUILT_ZIP_FILE_URL:-}
 
 if [[ $# -gt 0 ]]; then
   JAVA_LANGUAGE_VERSION="$1"; shift
@@ -107,36 +104,6 @@ if [[ $# -gt 0 ]]; then
 fi
 
 export TESTENV_DONT_BAZEL_CLEAN=1
-
-function set_up() {
-  cat >>WORKSPACE <<EOF
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-# java_tools versions only used to test Bazel with various JDK toolchains.
-EOF
-
-  if [[ ! -z "${JAVA_TOOLS_ZIP_FILE_URL}" ]]; then
-    cat >>WORKSPACE <<EOF
-http_archive(
-    name = "remote_java_tools",
-    urls = ["${JAVA_TOOLS_ZIP_FILE_URL}"]
-)
-http_archive(
-    name = "remote_java_tools_linux",
-    urls = ["${JAVA_TOOLS_PREBUILT_ZIP_FILE_URL}"]
-)
-http_archive(
-    name = "remote_java_tools_windows",
-    urls = ["${JAVA_TOOLS_PREBUILT_ZIP_FILE_URL}"]
-)
-http_archive(
-    name = "remote_java_tools_darwin",
-    urls = ["${JAVA_TOOLS_PREBUILT_ZIP_FILE_URL}"]
-)
-EOF
-  fi
-
-  cat $(rlocation io_bazel/src/test/shell/bazel/testdata/jdk_http_archives) >> WORKSPACE
-}
 
 function tear_down() {
   rm -rf "$(bazel info bazel-bin)/java"
@@ -314,6 +281,7 @@ java_custom_library = rule(
     "resources": attr.label_list(allow_files=True),
     "_java_toolchain": attr.label(default = Label("${JAVA_TOOLCHAIN}")),
   },
+  toolchains = ["${JAVA_TOOLCHAIN_TYPE}"],
   fragments = ["java"]
 )
 EOF
@@ -323,6 +291,12 @@ function test_build_hello_world() {
   write_hello_library_files
 
   bazel build //java/main:main &> $TEST_log || fail "build failed"
+}
+
+function test_build_hello_world_reduced_classpath() {
+  write_hello_library_files
+
+  bazel build --experimental_java_classpath=bazel //java/main:main &> $TEST_log || fail "build failed"
 }
 
 function test_worker_strategy_is_default() {
@@ -486,6 +460,7 @@ java_custom_library = rule(
     "sourcepath": attr.label_list(),
     "_java_toolchain": attr.label(default = Label("${JAVA_TOOLCHAIN}")),
   },
+  toolchains = ["${JAVA_TOOLCHAIN_TYPE}"],
   fragments = ["java"]
 )
 EOF
@@ -556,6 +531,7 @@ java_custom_library = rule(
     "sourcepath": attr.label_list(),
     "_java_toolchain": attr.label(default = Label("${JAVA_TOOLCHAIN}")),
   },
+  toolchains = ["${JAVA_TOOLCHAIN_TYPE}"],
   fragments = ["java"]
 )
 EOF
@@ -1463,6 +1439,7 @@ java_custom_library = rule(
     "jar": attr.label(allow_files=True),
     "_java_toolchain": attr.label(default = Label("${JAVA_TOOLCHAIN}")),
   },
+  toolchains = ["${JAVA_TOOLCHAIN_TYPE}"],
   fragments = ["java"]
 )
 EOF
@@ -1514,7 +1491,8 @@ my_rule = rule(
     'output_source_jar' : attr.string(),
     'source_jars' : attr.label_list(allow_files=['.jar']),
     "_java_toolchain": attr.label(default = Label("@bazel_tools//tools/jdk:remote_toolchain")),
-  }
+  },
+  toolchains = ["${JAVA_TOOLCHAIN_TYPE}"],
 )
 EOF
 
@@ -1598,6 +1576,7 @@ EOF
   chmod +x "${pkg}"/run.sh
 
   bazel test //"${pkg}":bar --test_output=all --verbose_failures >& "$TEST_log" \
+      --legacy_external_runfiles \
       || fail "Expected success"
 }
 
@@ -1763,5 +1742,364 @@ EOF
   bazel build //java/main:C2 &>"${TEST_log}" || fail "Expected to build"
 }
 
+function test_auto_bazel_repository() {
+  cat >> WORKSPACE <<'EOF'
+local_repository(
+  name = "other_repo",
+  path = "other_repo",
+)
+EOF
+
+  mkdir -p pkg
+  cat > pkg/BUILD.bazel <<'EOF'
+java_library(
+  name = "library",
+  srcs = ["Library.java"],
+  deps = ["@bazel_tools//tools/java/runfiles"],
+  visibility = ["//visibility:public"],
+)
+
+java_binary(
+  name = "binary",
+  srcs = ["Binary.java"],
+  main_class = "com.example.Binary",
+  deps = [
+    ":library",
+    "@bazel_tools//tools/java/runfiles",
+  ],
+)
+
+java_test(
+  name = "test",
+  srcs = ["Test.java"],
+  main_class = "com.example.Test",
+  use_testrunner = False,
+  deps = [
+    ":library",
+    "@bazel_tools//tools/java/runfiles",
+  ],
+)
+EOF
+
+  cat > pkg/Library.java <<'EOF'
+package com.example;
+
+import com.google.devtools.build.runfiles.AutoBazelRepository;
+
+@AutoBazelRepository
+public class Library {
+  public static void printRepositoryName() {
+    System.out.printf("in pkg/Library.java: '%s'%n", AutoBazelRepository_Library.NAME);
+  }
+}
+EOF
+
+  cat > pkg/Binary.java <<'EOF'
+package com.example;
+
+import com.google.devtools.build.runfiles.AutoBazelRepository;
+
+public class Binary {
+  @AutoBazelRepository
+  private static class Class1 {
+  }
+
+  public static void main(String[] args) {
+    System.out.printf("in pkg/Binary.java: '%s'%n", AutoBazelRepository_Binary_Class1.NAME);
+    Library.printRepositoryName();
+  }
+}
+EOF
+
+  cat > pkg/Test.java <<'EOF'
+package com.example;
+
+import com.google.devtools.build.runfiles.AutoBazelRepository;
+
+public class Test {
+  private static class Class1 {
+    @AutoBazelRepository
+    private static class Class2 {
+    }
+  }
+
+  public static void main(String[] args) {
+    System.out.printf("in pkg/Test.java: '%s'%n", AutoBazelRepository_Test_Class1_Class2.NAME);
+    Library.printRepositoryName();
+  }
+}
+EOF
+
+  mkdir -p other_repo
+  touch other_repo/WORKSPACE
+
+  mkdir -p other_repo/pkg
+  cat > other_repo/pkg/BUILD.bazel <<'EOF'
+java_library(
+  name = "library2",
+  srcs = ["Library2.java"],
+  deps = ["@bazel_tools//tools/java/runfiles"],
+)
+
+java_binary(
+  name = "binary",
+  srcs = ["Binary.java"],
+  main_class = "com.example.Binary",
+  deps = [
+    ":library2",
+    "@//pkg:library",
+    "@bazel_tools//tools/java/runfiles",
+  ],
+)
+java_test(
+  name = "test",
+  srcs = ["Test.java"],
+  main_class = "com.example.Test",
+  use_testrunner = False,
+  deps = [
+    ":library2",
+    "@//pkg:library",
+    "@bazel_tools//tools/java/runfiles",
+  ],
+)
+EOF
+
+  cat > other_repo/pkg/Library2.java <<'EOF'
+package com.example;
+
+import com.google.devtools.build.runfiles.AutoBazelRepository;
+
+@AutoBazelRepository
+public class Library2 {
+  public static void printRepositoryName() {
+    System.out.printf("in external/other_repo/pkg/Library2.java: '%s'%n", AutoBazelRepository_Library2.NAME);
+  }
+}
+EOF
+
+  cat > other_repo/pkg/Binary.java <<'EOF'
+package com.example;
+
+import com.google.devtools.build.runfiles.AutoBazelRepository;
+import static com.example.AutoBazelRepository_Binary.NAME;
+
+@AutoBazelRepository
+public class Binary {
+  public static void main(String[] args) {
+    System.out.printf("in external/other_repo/pkg/Binary.java: '%s'%n", NAME);
+    Library2.printRepositoryName();
+    Library.printRepositoryName();
+  }
+}
+EOF
+
+  cat > other_repo/pkg/Test.java <<'EOF'
+package com.example;
+
+import com.google.devtools.build.runfiles.AutoBazelRepository;
+
+@AutoBazelRepository
+public class Test {
+  public static void main(String[] args) {
+    System.out.printf("in external/other_repo/pkg/Test.java: '%s'%n", AutoBazelRepository_Test.NAME);
+    Library2.printRepositoryName();
+    Library.printRepositoryName();
+  }
+}
+EOF
+
+  bazel run //pkg:binary &>"$TEST_log" || fail "Run should succeed"
+  expect_log "in pkg/Binary.java: ''"
+  expect_log "in pkg/Library.java: ''"
+
+  bazel test --test_output=streamed //pkg:test &>"$TEST_log" || fail "Test should succeed"
+  expect_log "in pkg/Test.java: ''"
+  expect_log "in pkg/Library.java: ''"
+
+  bazel run @other_repo//pkg:binary &>"$TEST_log" || fail "Run should succeed"
+  expect_log "in external/other_repo/pkg/Binary.java: 'other_repo'"
+  expect_log "in external/other_repo/pkg/Library2.java: 'other_repo'"
+  expect_log "in pkg/Library.java: ''"
+
+  bazel test --test_output=streamed \
+    @other_repo//pkg:test &>"$TEST_log" || fail "Test should succeed"
+  expect_log "in external/other_repo/pkg/Test.java: 'other_repo'"
+  expect_log "in external/other_repo/pkg/Library2.java: 'other_repo'"
+  expect_log "in pkg/Library.java: ''"
+}
+
+function test_header_compiler_direct_supports_release() {
+  if [[ "${JAVA_TOOLS_PREBUILT_ZIP}" == "released" ]]; then
+    # TODO: Remove after the next java_tools release.
+    return
+  fi
+
+  mkdir -p pkg
+  cat << 'EOF' > pkg/BUILD
+java_library(name = "a", srcs = ["A.java"], deps = [":b"])
+java_library(name = "b", srcs = ["B.java"], javacopts = ["--release", "11"])
+EOF
+  cat << 'EOF' > pkg/A.java
+public class A extends B {}
+EOF
+  cat << 'EOF' > pkg/B.java
+public class B {}
+EOF
+
+  bazel build //pkg:a >& $TEST_log || fail "build failed"
+}
+
+function test_sandboxed_multiplexing() {
+  mkdir -p pkg
+  cat << 'EOF' > pkg/BUILD
+load("@bazel_tools//tools/jdk:default_java_toolchain.bzl", "default_java_toolchain")
+default_java_toolchain(
+    name = "java_toolchain",
+    source_version = "17",
+    target_version = "17",
+    javac_supports_worker_multiplex_sandboxing = True,
+)
+java_library(name = "a", srcs = ["A.java"], deps = [":b"])
+java_library(name = "b", srcs = ["B.java"])
+EOF
+  cat << 'EOF' > pkg/A.java
+public class A extends B {}
+EOF
+  cat << 'EOF' > pkg/B.java
+public class B {}
+EOF
+
+  bazel build //pkg:a \
+    --experimental_worker_multiplex_sandboxing \
+    --java_language_version=17 \
+    --extra_toolchains=//pkg:java_toolchain_definition \
+    >& $TEST_log || fail "build failed"
+}
+
+function test_strict_deps_error_external_repo_starlark_action() {
+  cat << 'EOF' > MODULE.bazel
+bazel_dep(
+    name = "lib_c",
+    repo_name = "c",
+)
+local_path_override(
+    module_name = "lib_c",
+    path = "lib_c",
+)
+EOF
+
+  mkdir -p pkg
+  cat << 'EOF' > pkg/BUILD
+java_library(name = "a", srcs = ["A.java"], deps = [":b"])
+java_library(name = "b", srcs = ["B.java"], deps = ["@c"])
+EOF
+  cat << 'EOF' > pkg/A.java
+public class A extends B implements C {}
+EOF
+  cat << 'EOF' > pkg/B.java
+public class B implements C {}
+EOF
+
+  mkdir -p lib_c
+  cat << 'EOF' > lib_c/MODULE.bazel
+module(name = "lib_c")
+EOF
+  cat << 'EOF' > lib_c/BUILD
+java_library(name = "c_pregen", srcs = ["C.java"])
+java_import(name = "c", jars = ["libc_pregen.jar"], visibility = ["//visibility:public"])
+EOF
+  cat << 'EOF' > lib_c/C.java
+public interface C {}
+EOF
+
+  bazel build //pkg:a >& $TEST_log && fail "build should fail"
+  expect_log "buildozer 'add deps @c//:c' //pkg:a"
+}
+
+function test_strict_deps_error_external_repo_header_compile_action() {
+  cat << 'EOF' > MODULE.bazel
+bazel_dep(
+    name = "lib_c",
+    repo_name = "c",
+)
+local_path_override(
+    module_name = "lib_c",
+    path = "lib_c",
+)
+EOF
+
+  mkdir -p pkg
+  cat << 'EOF' > pkg/BUILD
+java_binary(name = "Main", srcs = ["Main.java"], deps = [":a"])
+java_library(name = "a", srcs = ["A.java"], deps = [":b"])
+java_library(name = "b", srcs = ["B.java"], deps = ["@c"])
+EOF
+  cat << 'EOF' > pkg/Main.java
+public class Main extends A {}
+EOF
+  cat << 'EOF' > pkg/A.java
+public class A extends B implements C {}
+EOF
+  cat << 'EOF' > pkg/B.java
+public class B implements C {}
+EOF
+
+  mkdir -p lib_c
+  cat << 'EOF' > lib_c/MODULE.bazel
+module(name = "lib_c")
+EOF
+  cat << 'EOF' > lib_c/BUILD
+java_library(name = "c", srcs = ["C.java"], visibility = ["//visibility:public"])
+EOF
+  cat << 'EOF' > lib_c/C.java
+public interface C {}
+EOF
+
+  bazel build //pkg:a >& $TEST_log && fail "build should fail"
+  expect_log "buildozer 'add deps @c//:c' //pkg:a"
+}
+
+function test_strict_deps_error_external_repo_compile_action() {
+  cat << 'EOF' > MODULE.bazel
+bazel_dep(
+    name = "lib_c",
+    repo_name = "c",
+)
+local_path_override(
+    module_name = "lib_c",
+    path = "lib_c",
+)
+EOF
+
+  mkdir -p pkg
+  cat << 'EOF' > pkg/BUILD
+java_library(name = "a", srcs = ["A.java"], deps = [":b"])
+java_library(name = "b", srcs = ["B.java"], deps = ["@c"])
+EOF
+  cat << 'EOF' > pkg/A.java
+public class A extends B {
+  boolean foo() {
+    return this instanceof C;
+  }
+}
+EOF
+  cat << 'EOF' > pkg/B.java
+public class B implements C {}
+EOF
+
+  mkdir -p lib_c
+  cat << 'EOF' > lib_c/MODULE.bazel
+module(name = "lib_c")
+EOF
+  cat << 'EOF' > lib_c/BUILD
+java_library(name = "c", srcs = ["C.java"], visibility = ["//visibility:public"])
+EOF
+  cat << 'EOF' > lib_c/C.java
+public interface C {}
+EOF
+
+  bazel build //pkg:a >& $TEST_log && fail "build should fail"
+  expect_log "buildozer 'add deps @c//:c' //pkg:a"
+}
 
 run_suite "Java integration tests"

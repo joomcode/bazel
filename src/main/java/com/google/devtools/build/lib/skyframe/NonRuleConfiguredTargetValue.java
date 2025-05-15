@@ -22,8 +22,8 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.packages.Package;
+import com.google.devtools.build.lib.skyframe.serialization.VisibleForSerialization;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
 import javax.annotation.Nullable;
 
 /** A non-rule configured target in the context of a Skyframe graph. */
@@ -37,7 +37,7 @@ public final class NonRuleConfiguredTargetValue implements ConfiguredTargetValue
   @Nullable private ConfiguredTarget configuredTarget;
 
   // May be null either after clearing or because transitive packages are not tracked.
-  @Nullable private NestedSet<Package> transitivePackagesForPackageRootResolution;
+  @Nullable private NestedSet<Package> transitivePackages;
 
   @AutoCodec.Instantiator
   @VisibleForSerialization
@@ -48,30 +48,29 @@ public final class NonRuleConfiguredTargetValue implements ConfiguredTargetValue
   }
 
   NonRuleConfiguredTargetValue(
-      ConfiguredTarget configuredTarget,
-      @Nullable NestedSet<Package> transitivePackagesForPackageRootResolution) {
+      ConfiguredTarget configuredTarget, @Nullable NestedSet<Package> transitivePackages) {
     this.configuredTarget = Preconditions.checkNotNull(configuredTarget);
-    this.transitivePackagesForPackageRootResolution = transitivePackagesForPackageRootResolution;
+    this.transitivePackages = transitivePackages;
   }
 
+  @Nullable // May be null after clearing.
   @Override
   public ConfiguredTarget getConfiguredTarget() {
-    Preconditions.checkNotNull(configuredTarget);
     return configuredTarget;
   }
 
+  @Nullable
   @Override
-  public NestedSet<Package> getTransitivePackagesForPackageRootResolution() {
-    return Preconditions.checkNotNull(transitivePackagesForPackageRootResolution);
+  public NestedSet<Package> getTransitivePackages() {
+    return transitivePackages;
   }
 
   @Override
   public void clear(boolean clearEverything) {
-    Preconditions.checkNotNull(configuredTarget);
     if (clearEverything) {
       configuredTarget = null;
     }
-    transitivePackagesForPackageRootResolution = null;
+    transitivePackages = null;
   }
 
   @Override

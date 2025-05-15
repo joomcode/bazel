@@ -17,6 +17,7 @@ package com.google.devtools.build.lib.buildeventstream.transports;
 import static com.google.common.truth.Truth.assertThat;
 import static org.mockito.Mockito.when;
 
+import com.google.devtools.build.lib.buildeventservice.BuildEventServiceOptions.BesUploadMode;
 import com.google.devtools.build.lib.buildeventstream.ArtifactGroupNamer;
 import com.google.devtools.build.lib.buildeventstream.BuildEvent;
 import com.google.devtools.build.lib.buildeventstream.BuildEventContext;
@@ -87,7 +88,8 @@ public class JsonFormatFileTransportTest {
             outputStream,
             defaultOpts,
             new LocalFilesArtifactUploader(),
-            artifactGroupNamer);
+            artifactGroupNamer,
+            BesUploadMode.WAIT_FOR_UPLOAD_COMPLETE);
     transport.sendBuildEvent(buildEvent);
 
     transport.close().get();
@@ -103,7 +105,7 @@ public class JsonFormatFileTransportTest {
   /**
    * A thin wrapper around an OutputStream that counts number of bytes written and verifies flushes.
    *
-   * <p>The methods below need to be syncrhonized because they override methods from {@link
+   * <p>The methods below need to be synchronized because they override methods from {@link
    * BufferedOutputStream} *not* because there's a concurrent access to the stream.
    */
   private static final class WrappedOutputStream extends BufferedOutputStream {
@@ -155,7 +157,11 @@ public class JsonFormatFileTransportTest {
 
     JsonFormatFileTransport transport =
         new JsonFormatFileTransport(
-            wrappedOutputStream, defaultOpts, new LocalFilesArtifactUploader(), artifactGroupNamer);
+            wrappedOutputStream,
+            defaultOpts,
+            new LocalFilesArtifactUploader(),
+            artifactGroupNamer,
+            BesUploadMode.WAIT_FOR_UPLOAD_COMPLETE);
 
     transport.sendBuildEvent(buildEvent);
     Thread.sleep(transport.getFlushInterval().toMillis() * 3);

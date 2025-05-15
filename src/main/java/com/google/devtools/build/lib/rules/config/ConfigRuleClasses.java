@@ -32,7 +32,7 @@ import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.NonconfigurableAttributeMapper;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.Type;
-import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
+import com.google.devtools.build.lib.skyframe.serialization.VisibleForSerialization;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.SerializationConstant;
 
 /**
@@ -170,7 +170,7 @@ public class ConfigRuleClasses {
           <p>For convenience's sake, configuration values are specified as build flags (without
             the preceding <code>"--"</code>). But keep in mind that the two are not the same. This
             is because targets can be built in multiple configurations within the same
-            build. For example, a host configuration's "cpu" matches the value of
+            build. For example, an exec configuration's "cpu" matches the value of
             <code>--host_cpu</code>, not <code>--cpu</code>. So different instances of the
             same <code>config_setting</code> may match the same invocation differently
             depending on the configuration of the rule using them.
@@ -418,6 +418,7 @@ public class ConfigRuleClasses {
     public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
           .setUndocumented(/* the feature flag feature has not yet been launched */ )
+          // Some rule has to ask for ConfigFeatureFlagConfiguration.class so that it is retained.
           .requiresConfigurationFragments(ConfigFeatureFlagConfiguration.class)
           .add(
               attr("allowed_values", STRING_LIST)

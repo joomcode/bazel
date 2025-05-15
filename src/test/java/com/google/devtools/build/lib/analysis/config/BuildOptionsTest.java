@@ -145,7 +145,7 @@ public final class BuildOptionsTest {
 
   @Test
   public void optionsDiff_sameStarlarkOptions() {
-    Label flagName = Label.parseAbsoluteUnchecked("//foo/flag");
+    Label flagName = Label.parseCanonicalUnchecked("//foo/flag");
     String flagValue = "value";
     BuildOptions one = BuildOptions.of(ImmutableMap.of(flagName, flagValue));
     BuildOptions two = BuildOptions.of(ImmutableMap.of(flagName, flagValue));
@@ -155,7 +155,7 @@ public final class BuildOptionsTest {
 
   @Test
   public void optionsDiff_differentStarlarkOptions() {
-    Label flagName = Label.parseAbsoluteUnchecked("//bar/flag");
+    Label flagName = Label.parseCanonicalUnchecked("//bar/flag");
     String flagValueOne = "valueOne";
     String flagValueTwo = "valueTwo";
     BuildOptions one = BuildOptions.of(ImmutableMap.of(flagName, flagValueOne));
@@ -173,8 +173,8 @@ public final class BuildOptionsTest {
 
   @Test
   public void optionsDiff_extraStarlarkOptions() {
-    Label flagNameOne = Label.parseAbsoluteUnchecked("//extra/flag/one");
-    Label flagNameTwo = Label.parseAbsoluteUnchecked("//extra/flag/two");
+    Label flagNameOne = Label.parseCanonicalUnchecked("//extra/flag/one");
+    Label flagNameTwo = Label.parseCanonicalUnchecked("//extra/flag/two");
     String flagValue = "foo";
     BuildOptions one = BuildOptions.of(ImmutableMap.of(flagNameOne, flagValue));
     BuildOptions two = BuildOptions.of(ImmutableMap.of(flagNameTwo, flagValue));
@@ -218,6 +218,29 @@ public final class BuildOptionsTest {
   }
 
   @Test
+  public void serialize_primeFails_throws() throws Exception {
+    OptionsChecksumCache failToPrimeCache =
+        new OptionsChecksumCache() {
+          @Override
+          public BuildOptions getOptions(String checksum) {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
+          public boolean prime(BuildOptions options) {
+            return false;
+          }
+        };
+    BuildOptions options = BuildOptions.of(BUILD_CONFIG_OPTIONS);
+    SerializationContext serializationContext =
+        new SerializationContext(
+            ImmutableClassToInstanceMap.of(OptionsChecksumCache.class, failToPrimeCache));
+
+    assertThrows(
+        SerializationException.class, () -> TestUtils.toBytes(serializationContext, options));
+  }
+
+  @Test
   public void deserialize_unprimedCache_throws() throws Exception {
     BuildOptions options = BuildOptions.of(BUILD_CONFIG_OPTIONS);
 
@@ -252,7 +275,7 @@ public final class BuildOptionsTest {
 
     // Different checksum cache than the one used for serialization, but it has been primed.
     OptionsChecksumCache checksumCache = new MapBackedChecksumCache();
-    checksumCache.prime(options);
+    assertThat(checksumCache.prime(options)).isTrue();
     DeserializationContext deserializationContext =
         new DeserializationContext(
             ImmutableClassToInstanceMap.of(OptionsChecksumCache.class, checksumCache));
@@ -286,7 +309,7 @@ public final class BuildOptionsTest {
         .isNotEqualTo(modified.get(CoreOptions.class).cpu);
     assertThat(modified.get(CoreOptions.class).cpu).isEqualTo("bar");
     assertThat(modified.get(CoreOptions.class).stampBinaries).isFalse();
-    assertThat(modified.getStarlarkOptions().get(Label.parseAbsoluteUnchecked("//custom:flag")))
+    assertThat(modified.getStarlarkOptions().get(Label.parseCanonicalUnchecked("//custom:flag")))
         .isEqualTo("hello");
   }
 
@@ -350,7 +373,7 @@ public final class BuildOptionsTest {
   public void parsingResultMatchStarlark() throws Exception {
     BuildOptions original =
         BuildOptions.builder()
-            .addStarlarkOption(Label.parseAbsoluteUnchecked("//custom:flag"), "hello")
+            .addStarlarkOption(Label.parseCanonicalUnchecked("//custom:flag"), "hello")
             .build();
 
     OptionsParser matchingParser =
@@ -401,7 +424,7 @@ public final class BuildOptionsTest {
   public void parsingResultMatchEmptyNativeMatchWithStarlark() throws Exception {
     BuildOptions original =
         BuildOptions.builder()
-            .addStarlarkOption(Label.parseAbsoluteUnchecked("//custom:flag"), "hello")
+            .addStarlarkOption(Label.parseCanonicalUnchecked("//custom:flag"), "hello")
             .build();
 
     ImmutableList<Class<? extends FragmentOptions>> fragmentClasses =
@@ -421,7 +444,7 @@ public final class BuildOptionsTest {
   public void parsingResultMatchStarlarkOptionMissing() throws Exception {
     BuildOptions original =
         BuildOptions.builder()
-            .addStarlarkOption(Label.parseAbsoluteUnchecked("//custom:flag1"), "hello")
+            .addStarlarkOption(Label.parseCanonicalUnchecked("//custom:flag1"), "hello")
             .build();
 
     OptionsParser parser = OptionsParser.builder().optionsClasses(BUILD_CONFIG_OPTIONS).build();

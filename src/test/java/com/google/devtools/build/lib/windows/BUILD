@@ -1,6 +1,7 @@
 load("@rules_java//java:defs.bzl", "java_test")
 
 package(
+    default_applicable_licenses = ["//:license"],
     default_testonly = 1,
     default_visibility = ["//src:__subpackages__"],
 )
@@ -54,6 +55,7 @@ java_binary(
     name = "MockSubprocess",
     testonly = 1,
     srcs = ["MockSubprocess.java"],
+    deps = ["//third_party:guava"],
 )
 
 cc_binary(

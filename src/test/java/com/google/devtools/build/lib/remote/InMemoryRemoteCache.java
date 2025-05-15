@@ -30,10 +30,11 @@ import java.util.Map;
 class InMemoryRemoteCache extends RemoteExecutionCache {
 
   InMemoryRemoteCache(
-      Map<Digest, byte[]> casEntries,
-      RemoteOptions options,
-      DigestUtil digestUtil) {
-    super(new InMemoryCacheClient(casEntries), options, digestUtil);
+      Map<Digest, byte[]> casEntries, RemoteOptions options, DigestUtil digestUtil) {
+    super(
+        new InMemoryCacheClient(casEntries),
+        options,
+        digestUtil);
   }
 
   InMemoryRemoteCache(RemoteOptions options, DigestUtil digestUtil) {

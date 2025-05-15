@@ -19,15 +19,13 @@ import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Interner;
 import com.google.devtools.build.lib.analysis.AspectCollection;
 import com.google.devtools.build.lib.analysis.AspectCollection.AspectCycleOnPathException;
-import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.packages.Aspect;
 import com.google.devtools.build.lib.packages.AspectClass;
 import com.google.devtools.build.lib.packages.AspectDescriptor;
-import com.google.devtools.build.lib.packages.AspectsListBuilder;
+import com.google.devtools.build.lib.packages.AspectsList;
 import com.google.devtools.build.lib.packages.NativeAspectClass;
 import com.google.devtools.build.lib.packages.StarlarkAspect;
 import com.google.devtools.build.lib.packages.StarlarkAspectClass;
@@ -125,7 +123,7 @@ final class BuildTopLevelAspectsDetailsFunction implements SkyFunction {
       ImmutableList<AspectClass> topLevelAspectsClasses,
       ImmutableMap<String, String> topLevelAspectsParameters)
       throws InterruptedException, BuildTopLevelAspectsDetailsFunctionException {
-    AspectsListBuilder aspectsList = new AspectsListBuilder();
+    AspectsList.Builder builder = new AspectsList.Builder();
 
     for (AspectClass aspectClass : topLevelAspectsClasses) {
       if (aspectClass instanceof StarlarkAspectClass) {
@@ -134,16 +132,16 @@ final class BuildTopLevelAspectsDetailsFunction implements SkyFunction {
           return null;
         }
         try {
-          starlarkAspect.attachToAspectsList(/*baseAspectName=*/ null, aspectsList);
+          builder.addAspect(starlarkAspect);
         } catch (EvalException e) {
-          env.getListener().handle(Event.error(e.getMessage()));
+          env.getListener().handle(Event.error(e.getInnermostLocation(), e.getMessageWithStack()));
           throw new BuildTopLevelAspectsDetailsFunctionException(
               new TopLevelAspectsDetailsBuildFailedException(
                   e.getMessage(), Code.ASPECT_CREATION_FAILED));
         }
       } else {
         try {
-          aspectsList.addAspect((NativeAspectClass) aspectClass);
+          builder.addAspect((NativeAspectClass) aspectClass);
         } catch (AssertionError e) {
           env.getListener().handle(Event.error(e.getMessage()));
           throw new BuildTopLevelAspectsDetailsFunctionException(
@@ -153,11 +151,12 @@ final class BuildTopLevelAspectsDetailsFunction implements SkyFunction {
       }
     }
 
+    AspectsList aspectsList = builder.build();
     try {
         aspectsList.validateTopLevelAspectsParameters(topLevelAspectsParameters);
         return aspectsList.buildAspects(topLevelAspectsParameters);
     } catch (EvalException e) {
-      env.getListener().handle(Event.error(e.getMessage()));
+      env.getListener().handle(Event.error(e.getInnermostLocation(), e.getMessageWithStack()));
       throw new BuildTopLevelAspectsDetailsFunctionException(
           new TopLevelAspectsDetailsBuildFailedException(
               e.getMessage(), Code.ASPECT_CREATION_FAILED));
@@ -244,8 +243,8 @@ final class BuildTopLevelAspectsDetailsFunction implements SkyFunction {
   /** {@link SkyKey} for building top-level aspects details. */
   @AutoCodec
   static final class BuildTopLevelAspectsDetailsKey implements SkyKey {
-    private static final Interner<BuildTopLevelAspectsDetailsKey> interner =
-        BlazeInterners.newWeakInterner();
+    private static final SkyKeyInterner<BuildTopLevelAspectsDetailsKey> interner =
+        SkyKey.newInterner();
 
     private final ImmutableList<AspectClass> topLevelAspectsClasses;
     private final ImmutableMap<String, String> topLevelAspectsParameters;
@@ -310,6 +309,11 @@ final class BuildTopLevelAspectsDetailsFunction implements SkyFunction {
           .add("topLevelAspectsClasses", topLevelAspectsClasses)
           .add("topLevelAspectsParameters", topLevelAspectsParameters)
           .toString();
+    }
+
+    @Override
+    public SkyKeyInterner<BuildTopLevelAspectsDetailsKey> getSkyKeyInterner() {
+      return interner;
     }
   }
 

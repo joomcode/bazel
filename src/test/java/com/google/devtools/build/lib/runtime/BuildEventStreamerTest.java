@@ -15,6 +15,8 @@ package com.google.devtools.build.lib.runtime;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.stream.Collectors.joining;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -45,6 +47,7 @@ import com.google.devtools.build.lib.analysis.config.CoreOptions;
 import com.google.devtools.build.lib.analysis.config.FragmentFactory;
 import com.google.devtools.build.lib.analysis.config.FragmentRegistry;
 import com.google.devtools.build.lib.bugreport.BugReport;
+import com.google.devtools.build.lib.buildeventservice.BuildEventServiceOptions.BesUploadMode;
 import com.google.devtools.build.lib.buildeventstream.AnnounceBuildEventTransportsEvent;
 import com.google.devtools.build.lib.buildeventstream.ArtifactGroupNamer;
 import com.google.devtools.build.lib.buildeventstream.BuildEvent;
@@ -69,7 +72,6 @@ import com.google.devtools.build.lib.buildeventstream.transports.BuildEventStrea
 import com.google.devtools.build.lib.buildtool.BuildResult;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildCompleteEvent;
 import com.google.devtools.build.lib.buildtool.buildevent.NoAnalyzeEvent;
-import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
@@ -84,6 +86,9 @@ import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.util.FileSystems;
 import com.google.devtools.common.options.Options;
+import com.google.testing.junit.testparameterinjector.TestParameter;
+import com.google.testing.junit.testparameterinjector.TestParameterInjector;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -96,14 +101,14 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
+import java.util.stream.Stream;
 import javax.annotation.Nullable;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Tests {@link BuildEventStreamer}. */
-@RunWith(JUnit4.class)
+@RunWith(TestParameterInjector.class)
 public final class BuildEventStreamerTest extends FoundationTestCase {
 
   private static final String OOM_MESSAGE = "Please build fewer targets.";
@@ -169,6 +174,11 @@ public final class BuildEventStreamerTest extends FoundationTestCase {
     @Override
     public boolean mayBeSlow() {
       return false;
+    }
+
+    @Override
+    public BesUploadMode getBesUploadMode() {
+      return BesUploadMode.WAIT_FOR_UPLOAD_COMPLETE;
     }
 
     @Override
@@ -944,15 +954,15 @@ public final class BuildEventStreamerTest extends FoundationTestCase {
         new GenericBuildEvent(
             testId("Initial"), ImmutableSet.of(ProgressEvent.INITIAL_PROGRESS_UPDATE));
     BuildConfigurationValue configuration =
-        BuildConfigurationValue.create(
+        BuildConfigurationValue.createForTesting(
             defaultBuildOptions,
-            RepositoryName.createUnvalidated("workspace"),
-            /*siblingRepositoryLayout=*/ false,
-            /*transitionDirectoryNameFragment=*/ "",
+            "some_mnemonic",
+            "workspace",
+            /* siblingRepositoryLayout= */ false,
             new BlazeDirectories(
                 new ServerDirectories(outputBase, outputBase, outputBase),
                 rootDirectory,
-                /*defaultSystemJavabase=*/ null,
+                /* defaultSystemJavabase= */ null,
                 "productName"),
             new BuildConfigurationValue.GlobalStateProvider() {
               @Override
@@ -1081,6 +1091,77 @@ public final class BuildEventStreamerTest extends FoundationTestCase {
   }
 
   @Test
+  public void testFlushPreservesStdoutStderrOrder(
+      @TestParameter({"5", "30", "10000"}) int maxBufferedLength,
+      @TestParameter({"5", "30", "10000"}) int maxChunkSize)
+      throws IOException {
+    var stdout =
+        new SynchronizedOutputStream(maxBufferedLength, maxChunkSize, /* isStderr= */ false);
+    var stderr =
+        new SynchronizedOutputStream(maxBufferedLength, maxChunkSize, /* isStderr= */ true);
+    var outErr =
+        new BuildEventStreamer.OutErrProvider() {
+          @Override
+          public Iterable<String> getOut() {
+            return stdout.readAndReset();
+          }
+
+          @Override
+          public Iterable<String> getErr() {
+            return stderr.readAndReset();
+          }
+        };
+    streamer.registerOutErrProvider(outErr);
+    stdout.registerStreamer(streamer);
+    stderr.registerStreamer(streamer);
+
+    var startEvent =
+        new GenericBuildEvent(
+            testId("Initial"), ImmutableSet.of(ProgressEvent.INITIAL_PROGRESS_UPDATE));
+    streamer.buildEvent(startEvent);
+
+    stderr.write("[0 / 3] 3 actions running\n".getBytes(UTF_8));
+    stderr.write("INFO: From Executing genrule //:1:\n".getBytes(UTF_8));
+    stdout.write("Hello from genrule //:1 on stdout\n".getBytes(UTF_8));
+    stderr.write("Hello from genrule //:1 on stderr\n".getBytes(UTF_8));
+    stderr.write("[1 / 3] 2 actions running\n".getBytes(UTF_8));
+    stderr.write("INFO: From Executing genrule //:2:\n".getBytes(UTF_8));
+    stdout.write("Hello from genrule //:2 on stderr\n".getBytes(UTF_8));
+    stderr.write("Hello from genrule //:2 on stdout\n".getBytes(UTF_8));
+    stderr.write("[2 / 3] 1 actions running\n".getBytes(UTF_8));
+    stderr.write("INFO: From Executing genrule //:3:\n".getBytes(UTF_8));
+    stdout.write("Hello from genrule //:3 on stdout\n".getBytes(UTF_8));
+    stderr.write("Hello from genrule //:3 on stderr\n".getBytes(UTF_8));
+    stdout.write("Hello again from genrule //:3 on stdout\n".getBytes(UTF_8));
+    stderr.write("INFO: Build completed successfully, 3 total actions\n".getBytes(UTF_8));
+    streamer.close();
+
+    String reconstructedOutput =
+        transport.getEventProtos().stream()
+            .map(BuildEventStreamProtos.BuildEvent::getProgress)
+            .flatMap(progress -> Stream.of(progress.getStderr(), progress.getStdout()))
+            .collect(joining());
+    assertThat(reconstructedOutput)
+        .isEqualTo(
+            """
+            [0 / 3] 3 actions running
+            INFO: From Executing genrule //:1:
+            Hello from genrule //:1 on stdout
+            Hello from genrule //:1 on stderr
+            [1 / 3] 2 actions running
+            INFO: From Executing genrule //:2:
+            Hello from genrule //:2 on stderr
+            Hello from genrule //:2 on stdout
+            [2 / 3] 1 actions running
+            INFO: From Executing genrule //:3:
+            Hello from genrule //:3 on stdout
+            Hello from genrule //:3 on stderr
+            Hello again from genrule //:3 on stdout
+            INFO: Build completed successfully, 3 total actions
+            """);
+  }
+
+  @Test
   public void testNoopFlush() {
     // Verify that the streamer ignores a flush, if neither stream produces any output.
     BuildEventStreamer.OutErrProvider outErr = mock(BuildEventStreamer.OutErrProvider.class);
@@ -1111,7 +1192,7 @@ public final class BuildEventStreamerTest extends FoundationTestCase {
     // In this case, we expect 3 events in the stream, in that order:
     // - an artificial progress event as initial event, to properly link in
     //   all events
-    // - the unusal first event we have seen, and
+    // - the unusual first event we have seen, and
     // - a progress event reporting the flushed messages.
     BuildEventStreamer.OutErrProvider outErr = mock(BuildEventStreamer.OutErrProvider.class);
     String stdoutMsg = "Some text that was written to stdout.";

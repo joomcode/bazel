@@ -20,6 +20,7 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.Allowlist;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.RequiredConfigFragmentsProvider;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
@@ -29,6 +30,7 @@ import com.google.devtools.build.lib.analysis.RuleErrorConsumer;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.analysis.RunfilesSupport;
+import com.google.devtools.build.lib.analysis.SourceManifestAction;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.actions.Substitution;
 import com.google.devtools.build.lib.analysis.actions.Template;
@@ -66,6 +68,7 @@ import com.google.devtools.build.lib.rules.java.JavaToolchainProvider;
 import com.google.devtools.build.lib.rules.java.OneVersionCheckActionBuilder;
 import com.google.devtools.build.lib.rules.java.proto.GeneratedExtensionRegistryProvider;
 import com.google.devtools.build.lib.util.OS;
+import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.ArrayList;
 import java.util.List;
@@ -90,8 +93,6 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
 
     JavaSemantics javaSemantics = createJavaSemantics();
     AndroidSemantics androidSemantics = createAndroidSemantics();
-    AndroidLocalTestConfiguration androidLocalTestConfiguration =
-        ruleContext.getFragment(AndroidLocalTestConfiguration.class);
 
     AndroidDataContext dataContext = androidSemantics.makeContextForNative(ruleContext);
     ResourceApk resourceApk =
@@ -165,13 +166,9 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
         Substitution.of(
             "%android_custom_package%", resourceApk.getValidatedResources().getJavaPackage()));
 
-    boolean generateBinaryResources =
-        androidLocalTestConfiguration.useAndroidLocalTestBinaryResources();
-    if (generateBinaryResources) {
-      substitutions.add(
-          Substitution.of(
-              "%android_resource_apk%", resourceApk.getArtifact().getRunfilesPathString()));
-    }
+    substitutions.add(
+        Substitution.of(
+            "%android_resource_apk%", resourceApk.getArtifact().getRunfilesPathString()));
 
     ruleContext.registerAction(
         new TemplateExpansionAction(
@@ -278,9 +275,9 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
 
     String javaExecutable;
     if (javaSemantics.isJavaExecutableSubstitution()) {
-      javaExecutable = JavaCommon.getJavaBinSubstitution(ruleContext, launcher);
+      javaExecutable = javaCommon.getJavaBinSubstitution(ruleContext, launcher);
     } else {
-      javaExecutable = JavaCommon.getJavaExecutableForStub(ruleContext, launcher);
+      javaExecutable = javaCommon.getJavaExecutableForStub(ruleContext, launcher);
     }
 
     javaSemantics.createStubAction(
@@ -292,7 +289,7 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
         originalMainClass,
         filesToBuildBuilder,
         javaExecutable,
-        /* createCoverageMetadataJar= */ true);
+        /* createCoverageMetadataJar= */ false);
 
     Artifact oneVersionOutputArtifact = null;
     JavaConfiguration javaConfig = ruleContext.getFragment(JavaConfiguration.class);
@@ -305,8 +302,6 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
       oneVersionOutputArtifact =
           OneVersionCheckActionBuilder.newBuilder()
               .withEnforcementLevel(oneVersionEnforcementLevel)
-              .outputArtifact(
-                  ruleContext.getImplicitOutputArtifact(JavaSemantics.JAVA_ONE_VERSION_ARTIFACT))
               .useToolchain(javaToolchain)
               .checkJars(
                   NestedSetBuilder.fromNestedSet(attributes.getRuntimeClassPath())
@@ -325,7 +320,7 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
             resourceApk.getManifest(),
             resourceApk.getResourceJavaClassJar(),
             resourceApk.getValidatedResources().getMergedResources(),
-            generateBinaryResources ? resourceApk : null);
+            resourceApk);
 
     RunfilesSupport runfilesSupport =
         RunfilesSupport.withExecutable(ruleContext, defaultRunfiles, executable);
@@ -366,6 +361,60 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
 
     JavaInfo.Builder javaInfoBuilder = JavaInfo.Builder.create();
 
+    NestedSetBuilder<Pair<String, String>> coverageEnvironment = NestedSetBuilder.stableOrder();
+    NestedSetBuilder<Artifact> coverageSupportFiles = NestedSetBuilder.stableOrder();
+    if (ruleContext.getConfiguration().isCodeCoverageEnabled()) {
+
+      // Create an artifact that contains the runfiles relative paths of the jars on the runtime
+      // classpath. Using SourceManifestAction is the only reliable way to match the runfiles
+      // creation code.
+      Artifact runtimeClasspathArtifact =
+          ruleContext.getUniqueDirectoryArtifact(
+              "runtime_classpath_for_coverage",
+              "runtime_classpath.txt",
+              ruleContext.getBinOrGenfilesDirectory());
+      ruleContext.registerAction(
+          new SourceManifestAction(
+              SourceManifestAction.ManifestType.SOURCES_ONLY,
+              ruleContext.getActionOwner(),
+              runtimeClasspathArtifact,
+              new Runfiles.Builder(
+                      ruleContext.getWorkspaceName(),
+                      ruleContext.getConfiguration().legacyExternalRunfiles())
+                  // This matches the code below in collectDefaultRunfiles.
+                  .addTransitiveArtifactsWrappedInStableOrder(javaCommon.getRuntimeClasspath())
+                  .build(),
+              null,
+              true));
+      filesToBuildBuilder.add(runtimeClasspathArtifact);
+
+      // Pass the artifact through an environment variable in the coverage environment so it
+      // can be read by the coverage collection script.
+      coverageEnvironment.add(
+          new Pair<>(
+              "JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE", runtimeClasspathArtifact.getExecPathString()));
+      // Add the file to coverageSupportFiles so it ends up as an input for the test action
+      // when coverage is enabled.
+      coverageSupportFiles.add(runtimeClasspathArtifact);
+
+      // Make single jar reachable from the coverage environment because it needs to be executed
+      // by the coverage collection script.
+      FilesToRunProvider singleJar = JavaToolchainProvider.from(ruleContext).getSingleJar();
+      coverageEnvironment.add(
+          new Pair<>("SINGLE_JAR_TOOL", singleJar.getExecutable().getExecPathString()));
+      coverageSupportFiles.addTransitive(singleJar.getFilesToRun());
+    }
+
+    javaCommon.addTransitiveInfoProviders(
+        builder,
+        javaInfoBuilder,
+        filesToBuild,
+        classJar,
+        coverageEnvironment.build(),
+        coverageSupportFiles.build());
+    javaCommon.addGenJarsProvider(
+        builder, javaInfoBuilder, outputs.genClass(), outputs.genSource());
+
     javaCommon.addTransitiveInfoProviders(builder, javaInfoBuilder, filesToBuild, classJar);
     javaCommon.addGenJarsProvider(
         builder, javaInfoBuilder, outputs.genClass(), outputs.genSource());
@@ -374,11 +423,7 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
     AndroidFeatureFlagSetProvider.getAndValidateFlagMapFromRuleContext(ruleContext);
 
     if (oneVersionOutputArtifact != null) {
-      builder.addOutputGroup(
-          javaConfig.enforceOneVersionValidationAction()
-              ? OutputGroupInfo.VALIDATION
-              : OutputGroupInfo.HIDDEN_TOP_LEVEL,
-          oneVersionOutputArtifact);
+      builder.addOutputGroup(OutputGroupInfo.VALIDATION, oneVersionOutputArtifact);
     }
 
     NestedSet<Artifact> extraFilesToRun =
@@ -386,13 +431,13 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
 
     JavaInfo javaInfo =
         javaInfoBuilder
-            .addProvider(JavaSourceJarsProvider.class, sourceJarsProvider)
-            .addProvider(JavaRuleOutputJarsProvider.class, ruleOutputJarsProvider)
+            .javaSourceJars(sourceJarsProvider)
+            .javaRuleOutputs(ruleOutputJarsProvider)
             .build();
 
     return builder
         .setFilesToBuild(filesToBuild)
-        .addNativeDeclaredProvider(javaInfo)
+        .addStarlarkDeclaredProvider(javaInfo)
         .addProvider(
             RunfilesProvider.class,
             RunfilesProvider.withData(
@@ -425,14 +470,15 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
       JavaCommon common,
       JavaCompilationHelper helper,
       JavaCompilationArtifacts javaCompilationArtifacts,
-      JavaTargetAttributes attributes) {
+      JavaTargetAttributes attributes)
+      throws RuleErrorException {
     common.setJavaCompilationArtifacts(javaCompilationArtifacts);
     common.setClassPathFragment(
         new ClasspathConfiguredFragment(
             common.getJavaCompilationArtifacts(),
             attributes,
             false,
-            helper.getBootclasspathOrDefault()));
+            helper.getBootclasspathOrDefault().bootclasspath()));
   }
 
   private static void addJavaClassJarToArtifactsBuilder(
@@ -475,14 +521,20 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
     // runtime jars always in naive link order, incompatible with compile order runfiles.
     builder.addArtifacts(getRuntimeJarsForTargets(getAndCheckTestSupport(ruleContext)).toList());
 
-    builder.addTargets(depsForRunfiles, RunfilesProvider.DEFAULT_RUNFILES);
+    builder.addTargets(
+        depsForRunfiles,
+        RunfilesProvider.DEFAULT_RUNFILES,
+        ruleContext.getConfiguration().alwaysIncludeFilesToBuildInData());
 
     // We assume that the runtime jars will not have conflicting artifacts
     // with the same root relative path
     builder.addTransitiveArtifactsWrappedInStableOrder(javaCommon.getRuntimeClasspath());
 
     // Add the JDK files from P4 (see java_stub_template.txt).
-    builder.addTransitiveArtifacts(JavaRuntimeInfo.from(ruleContext).javaBaseInputs());
+    builder.addTransitiveArtifacts(
+        JavaRuntimeInfo.from(
+                ruleContext, javaCommon.getJavaSemantics().getJavaRuntimeToolchainType())
+            .javaBaseInputs());
     builder.addArtifact(manifest);
     builder.addArtifact(resourcesClassJar);
     builder.addArtifact(resourcesZip);
@@ -493,7 +545,8 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
     return builder.build();
   }
 
-  private static NestedSet<Artifact> getRuntimeJarsForTargets(TransitiveInfoCollection deps) {
+  private static NestedSet<Artifact> getRuntimeJarsForTargets(TransitiveInfoCollection deps)
+      throws RuleErrorException {
     // The dep may be a simple JAR and not a java rule, hence we can't simply do
     // dep.getProvider(JavaCompilationArgsProvider.class).getRecursiveJavaCompilationArgs(),
     // so we reuse the logic within JavaCompilationArgs to handle both scenarios.
@@ -580,7 +633,7 @@ public abstract class AndroidLocalTestBase implements RuleConfiguredTargetFactor
 
   /** Set test and robolectric specific jvm flags */
   protected abstract ImmutableList<String> getJvmFlags(RuleContext ruleContext, String testClass)
-      throws RuleErrorException;
+      throws RuleErrorException, InterruptedException;
 
   /**
    * Enables coverage support for Android and Java targets: adds instrumented jar to the classpath

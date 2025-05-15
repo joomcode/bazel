@@ -92,99 +92,6 @@ public class CcToolchainProviderTest extends BuildViewTestCase {
   }
 
   @Test
-  public void testRemoveCpuAndCompiler() throws Exception {
-    scratch.file(
-        "a/BUILD",
-        "load(':cc_toolchain_config.bzl', 'cc_toolchain_config')",
-        "filegroup(name = 'empty')",
-        "cc_toolchain_suite(",
-        "    name = 'a_suite',",
-        "    toolchains = { 'k8': ':a' },",
-        ")",
-        "cc_toolchain_suite(",
-        "    name = 'b_suite',",
-        "    toolchains = { 'k9': ':b', },",
-        ")",
-        "cc_toolchain_suite(",
-        "    name = 'c_suite',",
-        "    toolchains = { 'k10': ':c', },",
-        ")",
-        "cc_toolchain(",
-        "    name = 'a',",
-        "    cpu = 'banana',",
-        "    all_files = ':empty',",
-        "    ar_files = ':empty',",
-        "    as_files = ':empty',",
-        "    compiler_files = ':empty',",
-        "    dwp_files = ':empty',",
-        "    linker_files = ':empty',",
-        "    strip_files = ':empty',",
-        "    objcopy_files = ':empty',",
-        "    toolchain_identifier = 'banana',",
-        "    toolchain_config = ':banana_config',",
-        ")",
-        "cc_toolchain(",
-        "    name = 'b',",
-        "    compiler = 'banana',",
-        "    all_files = ':empty',",
-        "    ar_files = ':empty',",
-        "    as_files = ':empty',",
-        "    compiler_files = ':empty',",
-        "    dwp_files = ':empty',",
-        "    linker_files = ':empty',",
-        "    strip_files = ':empty',",
-        "    objcopy_files = ':empty',",
-        "    toolchain_identifier = 'banana',",
-        "    toolchain_config = ':banana_config',",
-        ")",
-        "cc_toolchain(",
-        "    name = 'c',",
-        "    all_files = ':empty',",
-        "    ar_files = ':empty',",
-        "    as_files = ':empty',",
-        "    compiler_files = ':empty',",
-        "    dwp_files = ':empty',",
-        "    linker_files = ':empty',",
-        "    strip_files = ':empty',",
-        "    objcopy_files = ':empty',",
-        "    toolchain_identifier = 'banana',",
-        "    toolchain_config = ':banana_config',",
-        ")",
-        "cc_toolchain_config(name = 'banana_config')");
-
-    scratch.file("a/cc_toolchain_config.bzl", MockCcSupport.EMPTY_CC_TOOLCHAIN);
-
-    reporter.removeHandler(failFastHandler);
-    useConfiguration(
-        "--crosstool_top=//a:a_suite",
-        "--cpu=k8",
-        "--host_cpu=k8",
-        "--incompatible_remove_cpu_and_compiler_attributes_from_cc_toolchain");
-    assertThat(getConfiguredTarget("//a:a_suite")).isNull();
-    assertContainsEvent(
-        "attributes 'cpu' and 'compiler' have been deprecated, please remove them.");
-    eventCollector.clear();
-
-    useConfiguration(
-        "--crosstool_top=//a:b_suite",
-        "--cpu=k9",
-        "--host_cpu=k9",
-        "--incompatible_remove_cpu_and_compiler_attributes_from_cc_toolchain");
-    assertThat(getConfiguredTarget("//a:b_suite")).isNull();
-    assertContainsEvent(
-        "attributes 'cpu' and 'compiler' have been deprecated, please remove them.");
-    eventCollector.clear();
-
-    useConfiguration(
-        "--crosstool_top=//a:c_suite",
-        "--cpu=k10",
-        "--host_cpu=k10",
-        "--incompatible_remove_cpu_and_compiler_attributes_from_cc_toolchain");
-    getConfiguredTarget("//a:c_suite");
-    assertNoEvents();
-  }
-
-  @Test
   public void testToolchainAndSuiteDifferentPackages() throws Exception {
     scratch.file(
         "suite/BUILD",
@@ -431,7 +338,7 @@ public class CcToolchainProviderTest extends BuildViewTestCase {
         break;
       }
     }
-    assertThat(gcovPath).isEmpty();
+    assertThat(gcovPath).isNull();
   }
 
   @Test
@@ -564,10 +471,8 @@ public class CcToolchainProviderTest extends BuildViewTestCase {
       }
     }
 
-    assertThat(llvmCov).isNotNull();
-    assertThat(llvmCov).isEmpty();
-    assertThat(llvmProfdata).isNotNull();
-    assertThat(llvmProfdata).isEmpty();
+    assertThat(llvmCov).isNull();
+    assertThat(llvmProfdata).isNull();
   }
 
   @Test
@@ -834,24 +739,24 @@ public class CcToolchainProviderTest extends BuildViewTestCase {
   @Test
   public void testDwpFilesIsBlocked() throws Exception {
     scratch.file(
-        "test/dwp_files_rule.bzl",
+        "foobar/dwp_files_rule.bzl",
         "def _impl(ctx):",
         "  cc_toolchain = ctx.attr._cc_toolchain[cc_common.CcToolchainInfo]",
         "  cc_toolchain.dwp_files()",
         "  return []",
         "dwp_files_rule = rule(",
         "  implementation = _impl,",
-        "  attrs = {'_cc_toolchain':" + " attr.label(default=Label('//test:alias'))},",
+        "  attrs = {'_cc_toolchain':" + " attr.label(default=Label('//foobar:alias'))},",
         ")");
     scratch.file(
-        "test/BUILD",
+        "foobar/BUILD",
         "load(':dwp_files_rule.bzl', 'dwp_files_rule')",
         "cc_toolchain_alias(name='alias')",
         "dwp_files_rule(name = 'target')");
     reporter.removeHandler(failFastHandler);
 
-    getConfiguredTarget("//test:target");
+    getConfiguredTarget("//foobar:target");
 
-    assertContainsEvent("Rule in 'test' cannot use private API");
+    assertContainsEvent("cannot use private API");
   }
 }

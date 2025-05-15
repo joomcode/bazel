@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.bazel.rules.android;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
@@ -26,6 +27,7 @@ import com.google.devtools.build.lib.rules.android.AndroidSemantics;
 import com.google.devtools.build.lib.rules.java.JavaCommon;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArtifacts;
 import com.google.devtools.build.lib.rules.java.JavaCompilationHelper;
+import com.google.devtools.build.lib.rules.java.JavaRuntimeInfo;
 import com.google.devtools.build.lib.rules.java.JavaSemantics;
 import com.google.devtools.build.lib.rules.java.JavaTargetAttributes;
 import com.google.devtools.build.lib.util.ShellEscaper;
@@ -33,6 +35,9 @@ import javax.annotation.Nullable;
 
 /** An implementation for the "android_local_test" rule. */
 public class BazelAndroidLocalTest extends AndroidLocalTestBase {
+
+  private static final String JACOCO_COVERAGE_RUNNER_MAIN_CLASS =
+      "com.google.testing.coverage.JacocoCoverageRunner";
 
   public BazelAndroidLocalTest() {
     super(BazelAndroidSemantics.INSTANCE);
@@ -50,19 +55,28 @@ public class BazelAndroidLocalTest extends AndroidLocalTestBase {
 
   @Override
   protected ImmutableList<String> getJvmFlags(RuleContext ruleContext, String testClass)
-      throws RuleErrorException {
+      throws RuleErrorException, InterruptedException {
     Artifact androidAllJarsPropertiesFile = getAndroidAllJarsPropertiesFile(ruleContext);
 
-    return ImmutableList.<String>builder()
-        .addAll(JavaCommon.getJvmFlags(ruleContext))
-        .add("-ea")
-        .add("-Dbazel.test_suite=" + ShellEscaper.escapeString(testClass))
-        .add("-Drobolectric.offline=true")
-        .add(
-            "-Drobolectric-deps.properties=" + androidAllJarsPropertiesFile.getRunfilesPathString())
-        .add("-Duse_framework_manifest_parser=true")
-        .add("-Dorg.robolectric.packagesToNotAcquire=com.google.testing.junit.runner.util")
-        .build();
+    ImmutableList.Builder<String> builder =
+        ImmutableList.<String>builder()
+            .addAll(JavaCommon.getJvmFlags(ruleContext))
+            .add("-ea")
+            .add("-Dbazel.test_suite=" + ShellEscaper.escapeString(testClass))
+            .add("-Drobolectric.offline=true")
+            .add(
+                "-Drobolectric-deps.properties="
+                    + androidAllJarsPropertiesFile.getRunfilesPathString())
+            .add("-Duse_framework_manifest_parser=true")
+            .add("-Dorg.robolectric.packagesToNotAcquire=com.google.testing.junit.runner.util");
+
+    if (JavaRuntimeInfo.from(ruleContext, createJavaSemantics().getJavaRuntimeToolchainType())
+            .version()
+        >= 17) {
+      builder.add("-Djava.security.manager=allow");
+    }
+
+    return builder.build();
   }
 
   @Override
@@ -76,9 +90,14 @@ public class BazelAndroidLocalTest extends AndroidLocalTestBase {
       JavaTargetAttributes.Builder attributesBuilder,
       String mainClass)
       throws RuleErrorException {
-    // coverage does not yet work with android_local_test
-    ruleContext.throwWithRuleError("android_local_test does not yet support coverage");
-    return "";
+    // This method can be called only for *_binary/*_test targets.
+    Preconditions.checkNotNull(executable);
+
+    helper.addCoverageSupport();
+
+    // We do not add the instrumented jar to the runtime classpath, but provide it in the shell
+    // script via an environment variable.
+    return JACOCO_COVERAGE_RUNNER_MAIN_CLASS;
   }
 
   @Override

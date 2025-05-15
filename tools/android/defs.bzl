@@ -14,6 +14,8 @@
 
 """Provides rules to run ijar and single_jar from java_toolchain."""
 
+load("@rules_java//java/common:java_common.bzl", "java_common")
+
 def _run_ijar(ctx):
     ijar_jar = java_common.run_ijar(
         ctx.actions,
@@ -32,6 +34,7 @@ run_ijar = rule(
             providers = [java_common.JavaToolchainInfo],
         ),
     },
+    toolchains = ["@bazel_tools//tools/jdk:toolchain_type"],
 )
 
 def _run_singlejar(ctx):

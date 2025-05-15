@@ -5,7 +5,10 @@ package(default_visibility = ["//visibility:public"])
 
 licenses(["notice"])
 
-exports_files(["LICENSE"])
+exports_files([
+    "LICENSE",
+    "MODULE.bazel",
+])
 
 load("@io_bazel//third_party/grpc:build_defs.bzl", "java_grpc_library")
 load("@io_bazel//tools/build_rules:utilities.bzl", "java_library_srcs")
@@ -34,7 +37,7 @@ filegroup(
         ":build_bazel_remote_asset_v1_remote_asset_java_grpc_srcs",
         ":build_bazel_remote_execution_v2_remote_execution_java_grpc_srcs",
     ],
-    visibility = ["@//src:__pkg__"],
+    visibility = ["@io_bazel//src:__pkg__"],
 )
 
 proto_library(

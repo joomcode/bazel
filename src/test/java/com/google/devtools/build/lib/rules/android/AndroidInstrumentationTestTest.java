@@ -180,7 +180,7 @@ public abstract class AndroidInstrumentationTestTest extends AndroidBuildViewTes
             getDirectPrerequisite(
                     androidInstrumentationTest.getConfiguredTarget(),
                     androidInstrumentationTest
-                        .getTarget()
+                        .getTargetForTesting()
                         .getAssociatedRule()
                         .getAttrDefaultValue("$test_entry_point")
                         .toString())
@@ -190,12 +190,24 @@ public abstract class AndroidInstrumentationTestTest extends AndroidBuildViewTes
                 .toList());
     assertThat(runfiles.stream().map(Artifact::toString).collect(toImmutableList()))
         .containsAtLeast(
-            getDeviceFixtureScript(getConfiguredTarget("//javatests/com/app:device_fixture"))
+            getDeviceFixtureScript(
+                    getDirectPrerequisite(
+                        androidInstrumentationTest.getConfiguredTarget(),
+                        "//javatests/com/app:device_fixture"))
                 .toString(),
-            getInstrumentationApk(getConfiguredTarget("//javatests/com/app:instrumentation_app"))
+            getInstrumentationApk(
+                    getDirectPrerequisite(
+                        androidInstrumentationTest.getConfiguredTarget(),
+                        "//javatests/com/app:instrumentation_app"))
                 .toString(),
-            getTargetApk(getConfiguredTarget("//javatests/com/app:instrumentation_app")).toString(),
-            getConfiguredTarget("//javatests/com/app/ait:foo.txt")
+            getTargetApk(
+                    getDirectPrerequisite(
+                        androidInstrumentationTest.getConfiguredTarget(),
+                        "//javatests/com/app:instrumentation_app"))
+                .toString(),
+            getDirectPrerequisite(
+                    androidInstrumentationTest.getConfiguredTarget(),
+                    "//javatests/com/app/ait:foo.txt")
                 .getProvider(FileProvider.class)
                 .getFilesToBuild()
                 .getSingleton()

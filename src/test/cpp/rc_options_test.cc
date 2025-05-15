@@ -31,6 +31,12 @@ using std::unordered_map;
 using std::vector;
 using ::testing::MatchesRegex;
 
+#if _WIN32
+constexpr bool kIsWindows = true;
+#else
+constexpr bool kIsWindows = false;
+#endif
+
 class RcOptionsTest : public ::testing::Test {
  protected:
   RcOptionsTest()
@@ -74,7 +80,7 @@ class RcOptionsTest : public ::testing::Test {
 
     // Test that exactly each command in the expected map was in the results,
     // and that for each of these, exactly the expected args are found, in the
-    // correct order. Note that this is not just an exercise in rewritting map
+    // correct order. Note that this is not just an exercise in rewriting map
     // equality - the results have type RcOption, and the expected values
     // are just strings. This is ignoring the source_path for convenience.
     const RcFile::OptionMap& result = rc->options();
@@ -400,8 +406,11 @@ TEST_F(RcOptionsTest, FileDoesNotExist) {
   EXPECT_EQ(error, RcFile::ParseError::UNREADABLE_FILE);
   ASSERT_THAT(
       error_text,
-      MatchesRegex(
-          "Unexpected error reading .blazerc file '.*not_a_file.bazelrc'"));
+      MatchesRegex(kIsWindows ? "Unexpected error reading config file "
+                                "'.*not_a_file\\.bazelrc':.*"
+                              : "Unexpected error reading config file "
+                                "'.*not_a_file\\.bazelrc': "
+                                "\\(error: 2\\): No such file or directory"));
 }
 
 TEST_F(RcOptionsTest, ImportedFileDoesNotExist) {
@@ -413,7 +422,16 @@ TEST_F(RcOptionsTest, ImportedFileDoesNotExist) {
   std::unique_ptr<RcFile> rc =
       Parse("import_fake_file.bazelrc", &error, &error_text);
   EXPECT_EQ(error, RcFile::ParseError::UNREADABLE_FILE);
-  ASSERT_EQ(error_text, "Unexpected error reading .blazerc file 'somefile'");
+  if (kIsWindows) {
+    ASSERT_THAT(
+        error_text,
+        MatchesRegex("Unexpected error reading config file 'somefile':.*"));
+  } else {
+    ASSERT_EQ(
+        error_text,
+        "Unexpected error reading config file 'somefile': (error: 2): No such "
+        "file or directory");
+  }
 }
 
 TEST_F(RcOptionsTest, TryImportedFileDoesNotExist) {
@@ -434,7 +452,7 @@ TEST_F(RcOptionsTest, ImportHasTooManyArgs) {
   EXPECT_EQ(error, RcFile::ParseError::INVALID_FORMAT);
   ASSERT_THAT(
       error_text,
-      MatchesRegex("Invalid import declaration in .blazerc file "
+      MatchesRegex("Invalid import declaration in config file "
                    "'.*bad_import.bazelrc': 'import somefile bar' \\(are you "
                    "in your source checkout/WORKSPACE\\?\\)"));
 }
@@ -448,7 +466,7 @@ TEST_F(RcOptionsTest, TryImportHasTooManyArgs) {
   EXPECT_EQ(error, RcFile::ParseError::INVALID_FORMAT);
   ASSERT_THAT(
       error_text,
-      MatchesRegex("Invalid import declaration in .blazerc file "
+      MatchesRegex("Invalid import declaration in config file "
                    "'.*bad_import.bazelrc': 'try-import somefile bar' \\(are "
                    "you in your source checkout/WORKSPACE\\?\\)"));
 }

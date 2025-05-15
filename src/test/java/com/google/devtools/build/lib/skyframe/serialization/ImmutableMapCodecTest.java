@@ -23,7 +23,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.collect.Ordering;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationException.NoCodecException;
-import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.SerializationConstant;
 import com.google.devtools.build.lib.skyframe.serialization.testutils.SerializationTester;
 import com.google.devtools.build.lib.skyframe.serialization.testutils.SerializationTester.VerificationFunction;
@@ -96,7 +95,7 @@ public class ImmutableMapCodecTest {
                         .buildOrThrow()));
     assertThat(thrown)
         .hasMessageThat()
-        .startsWith("No default codec available for " + comparator.getClass().getCanonicalName());
+        .startsWith("No default codec available for " + comparator.getClass().getName());
   }
 
   @Test

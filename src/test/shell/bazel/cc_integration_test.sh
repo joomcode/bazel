@@ -21,6 +21,13 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${CURRENT_DIR}/../integration_test_setup.sh" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
 
+function set_up() {
+  # test_inclusion_validation_with_overlapping_external_repo modifies the
+  # WORKSPACE file so make an effort to reconstruct it to its original state
+  # before every test case.
+  write_workspace_file "WORKSPACE" "$WORKSPACE_NAME"
+}
+
 function test_extra_action_for_compile() {
   mkdir -p ea
   cat > ea/BUILD <<EOF
@@ -209,7 +216,7 @@ mygen = rule(
   attrs={
     "srcs": attr.label_list(allow_files=True),
     "_mygen": attr.label(
-      cfg="host",
+      cfg="exec",
       executable=True,
       allow_files=True,
       default=":mygen_sh",
@@ -234,54 +241,6 @@ EOF
     "Second build failed, tree artifact was not invalidated."
 }
 
-# This test tests that Bazel can produce dynamic libraries that have undefined
-# symbols on Mac and Linux. Not sure it is a sane default to allow undefined
-# symbols, but it's the default we had historically. This test creates
-# an executable (main) that defines bar(), and a shared library (plugin) that
-# calls bar(). When linking the libplugin.so, symbol 'bar' is undefined.
-#    +-----------------------------+     +----------------------------------+
-#    |  main                       |     |  libplugin.so                    |
-#    |                             |     |                                  |
-#    |   main() { return foo(); } +---------> foo() { return bar() - 42; }  |
-#    |                             |     |       +                          |
-#    |                             |     |       |                          |
-#    |   bar() { return 42; } <------------------+                          |
-#    |                             |     |                                  |
-#    +-----------------------------+     +----------------------------------+
-function test_undefined_dynamic_lookup() {
-  if is_windows; then
-    # Windows doesn't allow undefined symbols in shared libraries.
-    return 0
-  fi
-  mkdir -p "dynamic_lookup"
-  cat > "dynamic_lookup/BUILD" <<EOF
-cc_binary(
-  name = "libplugin.so",
-  srcs = ["plugin.cc"],
-  linkshared = 1,
-)
-
-cc_binary(
-    name = "main",
-    srcs = ["main.cc", "libplugin.so"],
-)
-EOF
-
-  cat > "dynamic_lookup/plugin.cc" <<EOF
-int bar();
-int foo() { return bar() - 42; }
-EOF
-
-  cat > "dynamic_lookup/main.cc" <<EOF
-int foo();
-int bar() { return 42; }
-int main() { return foo(); }
-EOF
-
-  bazel build //dynamic_lookup:main || fail "Bazel couldn't build the binary."
-  bazel run //dynamic_lookup:main || fail "Run of the binary failed."
-}
-
 function test_save_feature_state() {
   mkdir -p ea
   cat > ea/BUILD <<EOF
@@ -296,9 +255,9 @@ EOF
   echo 'void cc1() {}' > ea/cc1.cc
 
   bazel build --experimental_builtins_injection_override=+cc_library --experimental_save_feature_state //ea:cc || fail "expected success"
-  ls bazel-bin/ea/cc_feature_state.txt || "cc_feature_state.txt not created"
+  ls bazel-bin/ea/cc_feature_state.txt || fail "cc_feature_state.txt not created"
   # This assumes "grep" is supported in any environment bazel is used.
-  grep "test_feature" bazel-bin/ea/cc_feature_state.txt || "test_feature should have been found in feature_state."
+  grep "test_feature" bazel-bin/ea/cc_feature_state.txt || fail "test_feature should have been found in feature_state."
 }
 
 # TODO: test include dirs and defines
@@ -538,8 +497,8 @@ EOF
 
   cat > $pkg/script.lds << EOF
 VERS_42.0 {
-  local:
-    *;
+  global:
+    f;
 };
 EOF
 
@@ -608,9 +567,8 @@ function test_cc_starlark_api_additional_inputs() {
   cat >> "$pkg"/BUILD << EOF
 cc_bin(
     name = "g",
-    srcs = ["e.cc"],
-    data = [":f"],
-    linkstatic = 1,
+    srcs = ["f.cc"],
+    linkshared = 1,
     additional_linker_inputs = ["script.lds"],
     user_link_flags = [
         "-ldl",
@@ -627,9 +585,7 @@ EOF
   bazel build --experimental_cc_skylark_api_enabled_packages=, --verbose_failures \
     //"$pkg":g  &>"$TEST_log" || fail "Build failed"
 
-  nm bazel-bin/"$pkg"/g  | grep VERS_42.0 || fail "VERS_42.0 not in binary"
-
-  bazel-bin/"$pkg"/g | grep a1a2bcddcb2a1a || fail "output is incorrect"
+  nm -D bazel-bin/"$pkg"/libg.so  | grep VERS_42.0 || fail "VERS_42.0 not in binary"
 }
 
 function test_incompatible_validate_top_level_header_inclusions() {
@@ -779,7 +735,7 @@ EOF
       --output_groups=out
 
   cat "bazel-bin/${package}/aspect_out" | \
-      grep "\(gcc\|clang\|clanc-cl.exe\|cl.exe\)" \
+      grep "\(gcc\|clang\|clanc-cl.exe\|cl.exe\|cc_wrapper.sh\)" \
       || fail "args didn't contain the tool path"
 
   cat "bazel-bin/${package}/aspect_out" | grep "a.*o .*b.*o .*c.*o" \
@@ -1011,7 +967,7 @@ EOF
   BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1 bazel query 'deps(//:ok)' &>"$TEST_log" || \
     fail "Should pass with fake toolchain"
   expect_not_log "An error occurred during the fetch of repository 'local_config_cc'"
-  expect_log "@local_config_cc//:empty"
+  expect_log "@@bazel_tools~cc_configure_extension~local_config_cc//:empty"
 }
 
 function setup_workspace_layout_with_external_directory() {
@@ -1457,53 +1413,719 @@ EOF
   bazel run //pkg:foo_bin_with_env &> "$TEST_log" || fail "Should have used env attr."
 }
 
-function test_getting_compile_action_env_with_cctoolchain_config_features() {
-  [ "$PLATFORM" != "darwin" ] || return 0
-
-  mkdir -p package
-
-  cat > "package/lib.bzl" <<EOF
-def _actions_test_impl(target, ctx):
-    compile_action = None
-
-    for action in target.actions:
-      if action.mnemonic in ["CppCompile", "ObjcCompile"]:
-        compile_action = action
-
-    print(compile_action.env)
-    return []
-
-actions_test_aspect = aspect(implementation = _actions_test_impl)
-EOF
-
-  cat > "package/x.cc" <<EOF
-#include <stdio.h>
-int main() {
-  printf("Hello\n");
-}
-EOF
-
-  cat > "package/BUILD" <<EOF
-cc_binary(
-  name = "x",
-  srcs = ["x.cc"],
+function external_cc_test_setup() {
+  cat >> WORKSPACE <<'EOF'
+local_repository(
+  name = "other_repo",
+  path = "other_repo",
 )
 EOF
 
-  # Without the flag, the env should not return extra fixed variables
-  bazel build "package:x" \
-      --aspects="//package:lib.bzl%actions_test_aspect" &>"$TEST_log" \
-      || fail "Build failed but should have succeeded"
+  mkdir -p other_repo
+  touch other_repo/WORKSPACE
 
-  expect_not_log "\"PWD\": \"/proc/self/cwd\""
+  mkdir -p other_repo/lib
+  cat > other_repo/lib/BUILD <<'EOF'
+cc_library(
+  name = "lib",
+  srcs = ["lib.cpp"],
+  hdrs = ["lib.h"],
+  visibility = ["//visibility:public"],
+)
+EOF
+  cat > other_repo/lib/lib.h <<'EOF'
+void print_greeting();
+EOF
+  cat > other_repo/lib/lib.cpp <<'EOF'
+#include <cstdio>
+void print_greeting() {
+  printf("Hello, world!\n");
+}
+EOF
 
-  # With the flag, the env should return extra fixed variables
-  bazel build "package:x" \
-      --aspects="//package:lib.bzl%actions_test_aspect" \
-      --experimental_get_fixed_configured_action_env &>"$TEST_log" \
-      || fail "Build failed but should have succeeded"
+  mkdir -p other_repo/test
+  cat > other_repo/test/BUILD <<'EOF'
+cc_test(
+  name = "test",
+  srcs = ["test.cpp"],
+  deps = ["//lib"],
+)
+EOF
+  cat > other_repo/test/test.cpp <<'EOF'
+#include "lib/lib.h"
+int main() {
+  print_greeting();
+}
+EOF
+}
 
-  expect_log "\"PWD\": \"/proc/self/cwd\""
+function test_external_cc_test_sandboxed() {
+  [ "$PLATFORM" != "windows" ] || return 0
+
+  external_cc_test_setup
+
+  bazel test \
+      --test_output=errors \
+      --strategy=sandboxed \
+      @other_repo//test >& $TEST_log || fail "Test should pass"
+}
+
+function test_external_cc_test_sandboxed_sibling_repository_layout() {
+  [ "$PLATFORM" != "windows" ] || return 0
+
+  external_cc_test_setup
+
+  bazel test \
+      --test_output=errors \
+      --strategy=sandboxed \
+      --experimental_sibling_repository_layout \
+      @other_repo//test >& $TEST_log || fail "Test should pass"
+}
+
+function test_external_cc_test_local() {
+  external_cc_test_setup
+
+  bazel test \
+      --test_output=errors \
+      --strategy=local \
+      @other_repo//test >& $TEST_log || fail "Test should pass"
+}
+
+function test_external_cc_test_local_sibling_repository_layout() {
+  external_cc_test_setup
+
+  bazel test \
+      --test_output=errors \
+      --strategy=local \
+      --experimental_sibling_repository_layout \
+      @other_repo//test >& $TEST_log || fail "Test should pass"
+
+  # Test cc compile action can hit the action cache. See
+  # https://github.com/bazelbuild/bazel/issues/17819
+  bazel shutdown
+
+  bazel test \
+      --test_output=errors \
+      --strategy=local \
+      --experimental_sibling_repository_layout \
+      @other_repo//test >& $TEST_log || fail "Test should pass"
+  expect_log "1 process: 1 internal"
+}
+
+function test_bazel_current_repository_define() {
+  cat >> WORKSPACE <<'EOF'
+local_repository(
+  name = "other_repo",
+  path = "other_repo",
+)
+EOF
+
+  mkdir -p pkg
+  cat > pkg/BUILD.bazel <<'EOF'
+cc_library(
+  name = "library",
+  srcs = ["library.cpp"],
+  hdrs = ["library.h"],
+  implementation_deps = ["@bazel_tools//tools/cpp/runfiles"],
+  visibility = ["//visibility:public"],
+)
+
+cc_binary(
+  name = "binary",
+  srcs = ["binary.cpp"],
+  deps = [
+    ":library",
+    "@bazel_tools//tools/cpp/runfiles",
+  ],
+)
+
+cc_test(
+  name = "test",
+  srcs = ["test.cpp"],
+  deps = [
+    ":library",
+    "@bazel_tools//tools/cpp/runfiles",
+  ],
+)
+EOF
+
+  cat > pkg/library.cpp <<'EOF'
+#include "library.h"
+#include <iostream>
+void print_repo_name() {
+  std::cout << "in " << __FILE__ << ": '" << BAZEL_CURRENT_REPOSITORY << "'" << std::endl;
+}
+EOF
+
+  cat > pkg/library.h <<'EOF'
+void print_repo_name();
+EOF
+
+  cat > pkg/binary.cpp <<'EOF'
+#include <iostream>
+#include "library.h"
+int main() {
+  std::cout << "in " << __FILE__ << ": '" << BAZEL_CURRENT_REPOSITORY << "'" << std::endl;
+  print_repo_name();
+}
+EOF
+
+  cat > pkg/test.cpp <<'EOF'
+#include <iostream>
+#include "library.h"
+int main() {
+  std::cout << "in " << __FILE__ << ": '" << BAZEL_CURRENT_REPOSITORY << "'" << std::endl;
+  print_repo_name();
+}
+EOF
+
+  mkdir -p other_repo
+  touch other_repo/WORKSPACE
+
+  mkdir -p other_repo/pkg
+  cat > other_repo/pkg/BUILD.bazel <<'EOF'
+cc_binary(
+  name = "binary",
+  srcs = ["binary.cpp"],
+  deps = [
+    "@//pkg:library",
+    "@bazel_tools//tools/cpp/runfiles",
+  ],
+)
+
+cc_test(
+  name = "test",
+  srcs = ["test.cpp"],
+  deps = [
+    "@//pkg:library",
+    "@bazel_tools//tools/cpp/runfiles",
+  ],
+)
+EOF
+
+  cat > other_repo/pkg/binary.cpp <<'EOF'
+#include <iostream>
+#include "pkg/library.h"
+int main() {
+  std::cout << "in " << __FILE__ << ": '" << BAZEL_CURRENT_REPOSITORY << "'" << std::endl;
+  print_repo_name();
+}
+EOF
+
+  cat > other_repo/pkg/test.cpp <<'EOF'
+#include <iostream>
+#include "pkg/library.h"
+int main() {
+  std::cout << "in " << __FILE__ << ": '" << BAZEL_CURRENT_REPOSITORY << "'" << std::endl;
+  print_repo_name();
+}
+EOF
+
+  bazel run //pkg:binary &>"$TEST_log" || fail "Run should succeed"
+  expect_log "in pkg/binary.cpp: ''"
+  expect_log "in pkg/library.cpp: ''"
+
+  bazel test --test_output=streamed //pkg:test &>"$TEST_log" || fail "Test should succeed"
+  expect_log "in pkg/test.cpp: ''"
+  expect_log "in pkg/library.cpp: ''"
+
+  bazel run @other_repo//pkg:binary &>"$TEST_log" || fail "Run should succeed"
+  expect_log "in external/other_repo/pkg/binary.cpp: 'other_repo'"
+  expect_log "in pkg/library.cpp: ''"
+
+  bazel test --test_output=streamed \
+    @other_repo//pkg:test &>"$TEST_log" || fail "Test should succeed"
+  expect_log "in external/other_repo/pkg/test.cpp: 'other_repo'"
+  expect_log "in pkg/library.cpp: ''"
+}
+
+function test_compiler_flag_gcc() {
+  # The default macOS toolchain always uses XCode's clang.
+  [ "$PLATFORM" != "darwin" ] || return 0
+  type -P gcc || return 0
+
+  cat > BUILD.bazel <<'EOF'
+config_setting(
+    name = "gcc_compiler",
+    flag_values = {"@bazel_tools//tools/cpp:compiler": "gcc"},
+)
+
+cc_binary(
+  name = "main",
+  srcs = select({":gcc_compiler": ["main.cc"]}),
+)
+EOF
+  cat > main.cc <<'EOF'
+int main() {}
+EOF
+
+  bazel build //:main --repo_env=CC=gcc || fail "Expected compiler flag to have value 'gcc'"
+}
+
+function test_compiler_flag_clang() {
+  type -P clang || return 0
+
+  cat > BUILD.bazel <<'EOF'
+config_setting(
+    name = "clang_compiler",
+    flag_values = {"@bazel_tools//tools/cpp:compiler": "clang"},
+)
+
+cc_binary(
+  name = "main",
+  srcs = select({":clang_compiler": ["main.cc"]}),
+)
+EOF
+  cat > main.cc <<'EOF'
+int main() {}
+EOF
+
+  bazel build //:main --repo_env=CC=clang || fail "Expected compiler flag to have value 'clang'"
+}
+
+function test_bazel_cxxopts() {
+  cat > BUILD.bazel <<'EOF'
+cc_binary(
+  name = "main_c",
+  srcs = ["main.c"],
+)
+cc_binary(
+  name = "main_cpp",
+  srcs = ["main.cpp"],
+)
+EOF
+  cat > main.c <<'EOF'
+#include <stdlib.h>
+int main() {
+  exit(EXIT_CODE);
+}
+EOF
+  cat > main.cpp <<'EOF'
+#include <stdlib.h>
+int main() {
+  exit(EXIT_CODE);
+}
+EOF
+
+  bazel build //:main_c \
+    --repo_env=BAZEL_USE_CPP_ONLY_TOOLCHAIN=1 \
+    --repo_env=BAZEL_CXXOPTS=-DEXIT_CODE=0 && fail "Expected C compilation to fail"
+  bazel run //:main_cpp \
+    --repo_env=BAZEL_USE_CPP_ONLY_TOOLCHAIN=1 \
+    --repo_env=BAZEL_CXXOPTS=-DEXIT_CODE=0 || fail "Expected C++ compilation to pass"
+}
+
+function test_bazel_conlyopts() {
+  cat > BUILD.bazel <<'EOF'
+cc_binary(
+  name = "main_c",
+  srcs = ["main.c"],
+)
+cc_binary(
+  name = "main_cpp",
+  srcs = ["main.cpp"],
+)
+EOF
+  cat > main.c <<'EOF'
+#include <stdlib.h>
+int main() {
+  exit(EXIT_CODE);
+}
+EOF
+  cat > main.cpp <<'EOF'
+#include <stdlib.h>
+int main() {
+  exit(EXIT_CODE);
+}
+EOF
+
+  bazel build //:main_cpp \
+    --repo_env=BAZEL_USE_CPP_ONLY_TOOLCHAIN=1 \
+    --repo_env=BAZEL_CONLYOPTS=-DEXIT_CODE=0 && fail "Expected C++ compilation to fail"
+  bazel run //:main_c \
+    --repo_env=BAZEL_USE_CPP_ONLY_TOOLCHAIN=1 \
+    --repo_env=BAZEL_CONLYOPTS=-DEXIT_CODE=0 || fail "Expected C compilation to pass"
+}
+
+function test_cc_test_no_target_coverage_dep() {
+  # Regression test for https://github.com/bazelbuild/bazel/issues/16961
+  local package="${FUNCNAME[0]}"
+  mkdir -p "${package}"
+
+  cat > "${package}"/BUILD.bazel <<'EOF'
+cc_test(
+  name = "test",
+  srcs = ["test.cc"],
+)
+EOF
+  touch "${package}"/test.cc
+
+  out=$(bazel cquery --collect_code_coverage \
+   "deps(//${package}:test) intersect config(@remote_coverage_tools//:all, target)")
+  if [[ -n "$out" ]]; then
+    fail "Expected no dependency on lcov_merger in the target configuration, but got: $out"
+  fi
+}
+
+function test_cc_test_no_coverage_tools_dep_without_coverage() {
+  # Regression test for https://github.com/bazelbuild/bazel/issues/16961 and
+  # https://github.com/bazelbuild/bazel/issues/15088.
+  local package="${FUNCNAME[0]}"
+  mkdir -p "${package}"
+
+  cat > "${package}"/BUILD.bazel <<'EOF'
+cc_test(
+  name = "test",
+  srcs = ["test.cc"],
+)
+EOF
+  touch "${package}"/test.cc
+
+  out=$(bazel cquery "somepath(//${package}:test,@remote_coverage_tools//:all)")
+  if [[ -n "$out" ]]; then
+    fail "Expected no dependency on remote coverage tools, but got: $out"
+  fi
+}
+
+# sanitizer features are opt-in so we check if the sanitizer library is
+# installed and skip the test if it isn't (e.g. centos-7-openjdk-11-gcc-10)
+function __is_installed() {
+  local lib="$1"
+
+  if [[ "$(uname -s | tr 'A-Z' 'a-z')" == "linux" ]]; then
+    return $(ldconfig -p | grep -q "$lib")
+  fi
+
+  # assume installed for darwin
+}
+
+function test_cc_toolchain_asan_feature() {
+  local feature=asan
+  __is_installed "lib$feature" || return 0
+
+  mkdir pkg
+  cat > pkg/BUILD <<EOF
+cc_binary(
+  name = 'example',
+  srcs = ['example.cc'],
+  features = ['$feature'],
+)
+EOF
+
+  # some versions of clang will optimize away the pointer assignment and
+  # dereference without volatile
+  # https://godbolt.org/z/of8cr3P8q
+  cat > pkg/example.cc <<EOF
+int main() {
+  volatile int* p;
+
+  {
+    volatile int x = 0;
+    p = &x;
+  }
+
+  return *p;
+}
+EOF
+
+  bazel run //pkg:example &> "$TEST_log" && fail "Should have failed due to $feature" || true
+  expect_log "ERROR: AddressSanitizer: stack-use-after-scope"
+}
+
+function test_cc_toolchain_tsan_feature() {
+  local feature=tsan
+  __is_installed "lib$feature" || return 0
+
+  mkdir pkg
+  cat > pkg/BUILD <<EOF
+cc_binary(
+  name = 'example',
+  srcs = ['example.cc'],
+  features = ['$feature'],
+)
+EOF
+
+  cat > pkg/example.cc <<EOF
+#include <thread>
+
+int value = 0;
+
+void increment() {
+  ++value;
+}
+
+int main() {
+  std::thread t1(increment);
+  std::thread t2(increment);
+  t1.join();
+  t2.join();
+
+  return value;
+}
+EOF
+
+  bazel run //pkg:example &> "$TEST_log" && fail "Should have failed due to $feature" || true
+  expect_log "WARNING: ThreadSanitizer: data race"
+}
+
+function test_cc_toolchain_ubsan_feature() {
+  local feature=ubsan
+  __is_installed "lib$feature" || return 0
+
+  mkdir pkg
+  cat > pkg/BUILD <<EOF
+cc_binary(
+  name = 'example',
+  srcs = ['example.cc'],
+  features = ['$feature'],
+)
+EOF
+
+  cat > pkg/example.cc <<EOF
+int main() {
+  int array[10];
+  return array[10];
+}
+EOF
+
+  bazel run //pkg:example &> "$TEST_log" && fail "Should have failed due to $feature" || true
+  expect_log "runtime error: index 10 out of bounds"
+}
+
+function setup_find_optional_cpp_toolchain() {
+  mkdir -p pkg
+
+  cat > pkg/BUILD <<'EOF'
+load(":rules.bzl", "my_rule")
+
+my_rule(
+    name = "my_rule",
+)
+
+platform(
+    name = "exotic_platform",
+    constraint_values = [
+        "@platforms//cpu:wasm64",
+        "@platforms//os:windows",
+    ],
+)
+EOF
+
+  cat > pkg/rules.bzl <<'EOF'
+load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain", "use_cpp_toolchain")
+
+def _my_rule_impl(ctx):
+    out = ctx.actions.declare_file(ctx.attr.name)
+    toolchain = find_cpp_toolchain(ctx, mandatory = False)
+    if toolchain:
+        ctx.actions.write(out, "Toolchain found")
+    else:
+        ctx.actions.write(out, "Toolchain not found")
+    return [DefaultInfo(files = depset([out]))]
+
+my_rule = rule(
+    implementation = _my_rule_impl,
+    attrs = {
+        "_cc_toolchain": attr.label(
+            default = "@bazel_tools//tools/cpp:optional_current_cc_toolchain",
+        ),
+    },
+    toolchains = use_cpp_toolchain(mandatory = False),
+)
+EOF
+}
+
+function test_find_optional_cpp_toolchain_present_without_toolchain_resolution() {
+  setup_find_optional_cpp_toolchain
+
+  bazel build //pkg:my_rule --noincompatible_enable_cc_toolchain_resolution \
+    &> "$TEST_log" || fail "Build failed"
+  assert_contains "Toolchain found" bazel-bin/pkg/my_rule
+}
+
+function test_find_optional_cpp_toolchain_present_with_toolchain_resolution() {
+  setup_find_optional_cpp_toolchain
+
+  bazel build //pkg:my_rule --incompatible_enable_cc_toolchain_resolution \
+    &> "$TEST_log" || fail "Build failed"
+  assert_contains "Toolchain found" bazel-bin/pkg/my_rule
+}
+
+function test_find_optional_cpp_toolchain_not_present_with_toolchain_resolution() {
+  setup_find_optional_cpp_toolchain
+
+  bazel build //pkg:my_rule --incompatible_enable_cc_toolchain_resolution \
+    --platforms=//pkg:exotic_platform &> "$TEST_log" || fail "Build failed"
+  assert_contains "Toolchain not found" bazel-bin/pkg/my_rule
+}
+
+function test_no_cpp_stdlib_linked_to_c_library() {
+  mkdir pkg
+  cat > pkg/BUILD <<'EOF'
+cc_binary(
+  name = 'example',
+  srcs = ['example.c'],
+)
+EOF
+  cat > pkg/example.c <<'EOF'
+int main() {}
+EOF
+
+  bazel build //pkg:example &> "$TEST_log" || fail "Build failed"
+  if is_darwin; then
+    otool -L bazel-bin/pkg/example &> "$TEST_log" || fail "otool failed"
+    expect_log 'libc'
+    expect_not_log 'libc\+\+'
+  else
+    ldd bazel-bin/pkg/example &> "$TEST_log" || fail "ldd failed"
+    expect_log 'libc'
+    expect_not_log 'libstdc\+\+'
+  fi
+}
+
+function test_parse_headers_unclean() {
+  mkdir pkg
+  cat > pkg/BUILD <<'EOF'
+cc_library(name = "lib", hdrs = ["lib.h"])
+EOF
+  cat > pkg/lib.h <<'EOF'
+// Missing include of cstdint, which defines uint8_t.
+uint8_t foo();
+EOF
+
+  bazel build -s --process_headers_in_dependencies --features parse_headers \
+    //pkg:lib &> "$TEST_log" && fail "Build should have failed due to unclean headers"
+  expect_log "Compiling pkg/lib.h"
+  expect_log "error:.*'uint8_t'"
+
+  bazel build -s --process_headers_in_dependencies \
+    //pkg:lib &> "$TEST_log" || fail "Build should have passed"
+}
+
+function test_parse_headers_clean() {
+  mkdir pkg
+  cat > pkg/BUILD <<'EOF'
+package(features = ["parse_headers"])
+cc_library(name = "lib", hdrs = ["lib.h"])
+EOF
+  cat > pkg/lib.h <<'EOF'
+#include <cstdint>
+uint8_t foo();
+EOF
+
+  bazel build -s --process_headers_in_dependencies \
+    //pkg:lib &> "$TEST_log" || fail "Build should have passed"
+  expect_log "Compiling pkg/lib.h"
+}
+
+# Test for a very obscure case that is sadly used by protobuf: when the
+# WORKSPACE file contains a local_repository with the same name as the main
+# one. See HeaderDiscovery.runDiscovery() for more details.
+function test_inclusion_validation_with_overlapping_external_repo() {
+  cat >> WORKSPACE<<EOF
+local_repository(name="$WORKSPACE_NAME", path=".")
+EOF
+
+  mkdir -p a
+  cat > a/BUILD <<'EOF'
+cc_library(name="a", srcs=["a.cc"])
+EOF
+
+  cat > a/a.cc <<'EOF'
+int a() {
+  return 3;
+}
+EOF
+
+  bazel build \
+    --noenable_bzlmod \
+    --experimental_sibling_repository_layout \
+    "@@$WORKSPACE_NAME//a:a" || fail "build failed"
+}
+
+function test_tree_artifact_sources_in_no_deps_library() {
+  mkdir -p pkg
+  cat > pkg/BUILD <<'EOF'
+load("generate.bzl", "generate_source")
+sh_binary(
+    name = "generate_tool",
+    srcs = ["generate.sh"],
+)
+
+generate_source(
+    name = "generated_source",
+    tool = ":generate_tool",
+    output_dir = "generated",
+)
+
+cc_library(
+    name = "hello_world",
+    srcs = [":generated_source"],
+    hdrs = [":generated_source"],
+)
+
+cc_test(
+    name = "testCodegen",
+    srcs = ["testCodegen.cpp"],
+    deps = [":hello_world"],
+)
+EOF
+  cat > pkg/generate.bzl <<'EOF'
+def _generate_source_impl(ctx):
+    output_dir = ctx.attr.output_dir
+    files = ctx.actions.declare_directory(output_dir)
+
+    ctx.actions.run(
+        inputs = [],
+        outputs = [files],
+        arguments = [files.path],
+        executable = ctx.executable.tool
+    )
+
+    return [
+        DefaultInfo(files = depset([files]))
+    ]
+
+
+generate_source = rule(
+    implementation = _generate_source_impl,
+    attrs = {
+        "output_dir": attr.string(),
+        "tool": attr.label(executable = True, cfg = "exec")
+    }
+)
+EOF
+  cat > pkg/generate.sh <<'EOF2'
+#!/bin/bash
+
+OUTPUT_DIR=$1
+
+cat << EOF > $OUTPUT_DIR/test.hpp
+#pragma once
+void hello_world();
+EOF
+
+
+cat << EOF > $OUTPUT_DIR/test.cpp
+#include "test.hpp"
+#include <cstdio>
+void hello_world()
+{
+    puts("Hello World!");
+}
+EOF
+EOF2
+  chmod +x pkg/generate.sh
+  cat > pkg/testCodegen.cpp <<'EOF'
+#include "pkg/generated/test.hpp"
+
+int main() {
+    hello_world();
+    return 0;
+}
+EOF
+
+  bazel build //pkg:testCodegen &> "$TEST_log" || fail "Build failed"
 }
 
 run_suite "cc_integration_test"

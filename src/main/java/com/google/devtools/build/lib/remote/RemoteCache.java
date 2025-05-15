@@ -20,6 +20,7 @@ import static com.google.devtools.build.lib.remote.util.Utils.bytesCountToDispla
 import static com.google.devtools.build.lib.remote.util.Utils.getFromFuture;
 
 import build.bazel.remote.execution.v2.ActionResult;
+import build.bazel.remote.execution.v2.CacheCapabilities;
 import build.bazel.remote.execution.v2.Digest;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
@@ -32,6 +33,7 @@ import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.devtools.build.lib.concurrent.ThreadSafety;
 import com.google.devtools.build.lib.exec.SpawnProgressEvent;
+import com.google.devtools.build.lib.remote.common.CacheNotFoundException;
 import com.google.devtools.build.lib.remote.common.LazyFileOutputStream;
 import com.google.devtools.build.lib.remote.common.OutputDigestMismatchException;
 import com.google.devtools.build.lib.remote.common.ProgressStatusListener;
@@ -58,6 +60,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
@@ -94,10 +97,18 @@ public class RemoteCache extends AbstractReferenceCounted {
     this.digestUtil = digestUtil;
   }
 
+  public CacheCapabilities getCacheCapabilities() throws IOException {
+    return cacheProtocol.getCacheCapabilities();
+  }
+
   public CachedActionResult downloadActionResult(
-      RemoteActionExecutionContext context, ActionKey actionKey, boolean inlineOutErr)
+      RemoteActionExecutionContext context,
+      ActionKey actionKey,
+      boolean inlineOutErr,
+      Set<String> inlineOutputFiles)
       throws IOException, InterruptedException {
-    return getFromFuture(cacheProtocol.downloadActionResult(context, actionKey, inlineOutErr));
+    return getFromFuture(
+        cacheProtocol.downloadActionResult(context, actionKey, inlineOutErr, inlineOutputFiles));
   }
 
   /**
@@ -110,6 +121,15 @@ public class RemoteCache extends AbstractReferenceCounted {
       return immediateFuture(ImmutableSet.of());
     }
     return cacheProtocol.findMissingDigests(context, digests);
+  }
+
+  /** Returns whether the action cache supports updating action results. */
+  public boolean actionCacheSupportsUpdate() {
+    try {
+      return getCacheCapabilities().getActionCacheUpdateCapabilities().getUpdateEnabled();
+    } catch (IOException ignored) {
+      return false;
+    }
   }
 
   /** Upload the action result to the remote cache. */
@@ -136,15 +156,21 @@ public class RemoteCache extends AbstractReferenceCounted {
    */
   public ListenableFuture<Void> uploadFile(
       RemoteActionExecutionContext context, Digest digest, Path file) {
+    return uploadFile(context, digest, file, /* force= */ false);
+  }
+
+  protected ListenableFuture<Void> uploadFile(
+      RemoteActionExecutionContext context, Digest digest, Path file, boolean force) {
     if (digest.getSizeBytes() == 0) {
       return COMPLETED_SUCCESS;
     }
 
     Completable upload =
-        casUploadCache.executeIfNot(
+        casUploadCache.execute(
             digest,
             RxFutures.toCompletable(
-                () -> cacheProtocol.uploadFile(context, digest, file), directExecutor()));
+                () -> cacheProtocol.uploadFile(context, digest, file), directExecutor()),
+            force);
 
     return RxFutures.toListenableFuture(upload);
   }
@@ -161,17 +187,28 @@ public class RemoteCache extends AbstractReferenceCounted {
    */
   public ListenableFuture<Void> uploadBlob(
       RemoteActionExecutionContext context, Digest digest, ByteString data) {
+    return uploadBlob(context, digest, data, /* force= */ false);
+  }
+
+  protected ListenableFuture<Void> uploadBlob(
+      RemoteActionExecutionContext context, Digest digest, ByteString data, boolean force) {
     if (digest.getSizeBytes() == 0) {
       return COMPLETED_SUCCESS;
     }
 
     Completable upload =
-        casUploadCache.executeIfNot(
+        casUploadCache.execute(
             digest,
             RxFutures.toCompletable(
-                () -> cacheProtocol.uploadBlob(context, digest, data), directExecutor()));
+                () -> cacheProtocol.uploadBlob(context, digest, data), directExecutor()),
+            force);
 
     return RxFutures.toListenableFuture(upload);
+  }
+
+  public ListenableFuture<byte[]> downloadBlob(
+      RemoteActionExecutionContext context, Digest digest) {
+    return downloadBlob(context, /* blobName= */ "", digest);
   }
 
   /**
@@ -181,14 +218,22 @@ public class RemoteCache extends AbstractReferenceCounted {
    *     the content is stored in the future's {@code byte[]}.
    */
   public ListenableFuture<byte[]> downloadBlob(
-      RemoteActionExecutionContext context, Digest digest) {
+      RemoteActionExecutionContext context, String blobName, Digest digest) {
     if (digest.getSizeBytes() == 0) {
       return EMPTY_BYTES;
     }
     ByteArrayOutputStream bOut = new ByteArrayOutputStream((int) digest.getSizeBytes());
+    var download = downloadBlob(context, blobName, digest, bOut);
     SettableFuture<byte[]> outerF = SettableFuture.create();
+    outerF.addListener(
+        () -> {
+          if (outerF.isCancelled()) {
+            download.cancel(/* mayInterruptIfRunning= */ true);
+          }
+        },
+        directExecutor());
     Futures.addCallback(
-        cacheProtocol.downloadBlob(context, digest, bOut),
+        download,
         new FutureCallback<Void>() {
           @Override
           public void onSuccess(Void aVoid) {
@@ -210,17 +255,43 @@ public class RemoteCache extends AbstractReferenceCounted {
   }
 
   private ListenableFuture<Void> downloadBlob(
-      RemoteActionExecutionContext context, Digest digest, OutputStream out) {
+      RemoteActionExecutionContext context, String blobName, Digest digest, OutputStream out) {
     if (digest.getSizeBytes() == 0) {
       return COMPLETED_SUCCESS;
     }
+    var download = cacheProtocol.downloadBlob(context, digest, out);
+    SettableFuture<Void> future = SettableFuture.create();
+    future.addListener(
+        () -> {
+          if (future.isCancelled()) {
+            download.cancel(/* mayInterruptIfRunning= */ true);
+          }
+        },
+        directExecutor());
+    Futures.addCallback(
+        download,
+        new FutureCallback<Void>() {
+          @Override
+          public void onSuccess(Void result) {
+            future.set(result);
+          }
 
-    return cacheProtocol.downloadBlob(context, digest, out);
+          @Override
+          public void onFailure(Throwable t) {
+            if (t instanceof CacheNotFoundException) {
+              ((CacheNotFoundException) t).setFilename(blobName);
+            }
+            future.setException(t);
+          }
+        },
+        directExecutor());
+    return future;
   }
 
   /** A reporter that reports download progresses. */
   public static class DownloadProgressReporter {
     private static final Pattern PATTERN = Pattern.compile("^bazel-out/[^/]+/[^/]+/");
+    private final boolean includeFile;
     private final ProgressStatusListener listener;
     private final String id;
     private final String file;
@@ -228,6 +299,12 @@ public class RemoteCache extends AbstractReferenceCounted {
     private final AtomicLong downloadedBytes = new AtomicLong(0);
 
     public DownloadProgressReporter(ProgressStatusListener listener, String file, long totalSize) {
+      this(/* includeFile= */ true, listener, file, totalSize);
+    }
+
+    public DownloadProgressReporter(
+        boolean includeFile, ProgressStatusListener listener, String file, long totalSize) {
+      this.includeFile = includeFile;
       this.listener = listener;
       this.id = file;
       this.totalSize = bytesCountToDisplayString(totalSize);
@@ -252,12 +329,21 @@ public class RemoteCache extends AbstractReferenceCounted {
     private void reportProgress(boolean includeBytes, boolean finished) {
       String progress;
       if (includeBytes) {
-        progress =
-            String.format(
-                "Downloading %s, %s / %s",
-                file, bytesCountToDisplayString(downloadedBytes.get()), totalSize);
+        if (includeFile) {
+          progress =
+              String.format(
+                  "Downloading %s, %s / %s",
+                  file, bytesCountToDisplayString(downloadedBytes.get()), totalSize);
+        } else {
+          progress =
+              String.format("%s / %s", bytesCountToDisplayString(downloadedBytes.get()), totalSize);
+        }
       } else {
-        progress = String.format("Downloading %s", file);
+        if (includeFile) {
+          progress = String.format("Downloading %s", file);
+        } else {
+          progress = "";
+        }
       }
       listener.onProgressStatus(SpawnProgressEvent.create(id, progress, finished));
     }
@@ -272,6 +358,13 @@ public class RemoteCache extends AbstractReferenceCounted {
       throws IOException {
     SettableFuture<Void> outerF = SettableFuture.create();
     ListenableFuture<Void> f = downloadFile(context, localPath, digest, reporter);
+    outerF.addListener(
+        () -> {
+          if (outerF.isCancelled()) {
+            f.cancel(/* mayInterruptIfRunning= */ true);
+          }
+        },
+        directExecutor());
     Futures.addCallback(
         f,
         new FutureCallback<Void>() {
@@ -282,7 +375,10 @@ public class RemoteCache extends AbstractReferenceCounted {
 
           @Override
           public void onFailure(Throwable throwable) {
-            if (throwable instanceof OutputDigestMismatchException) {
+            if (throwable instanceof CacheNotFoundException) {
+              var cacheNotFoundException = (CacheNotFoundException) throwable;
+              cacheNotFoundException.setFilename(outputPath);
+            } else if (throwable instanceof OutputDigestMismatchException) {
               OutputDigestMismatchException e = ((OutputDigestMismatchException) throwable);
               e.setOutputPath(outputPath);
               e.setLocalPath(localPath);
@@ -298,11 +394,16 @@ public class RemoteCache extends AbstractReferenceCounted {
   /** Downloads a file (that is not a directory). The content is fetched from the digest. */
   public ListenableFuture<Void> downloadFile(
       RemoteActionExecutionContext context, Path path, Digest digest) throws IOException {
-    return downloadFile(context, path, digest, new DownloadProgressReporter(NO_ACTION, "", 0));
+    return downloadFile(
+        context,
+        path.getPathString(),
+        path,
+        digest,
+        new DownloadProgressReporter(NO_ACTION, "", 0));
   }
 
   /** Downloads a file (that is not a directory). The content is fetched from the digest. */
-  public ListenableFuture<Void> downloadFile(
+  private ListenableFuture<Void> downloadFile(
       RemoteActionExecutionContext context,
       Path path,
       Digest digest,
@@ -336,11 +437,12 @@ public class RemoteCache extends AbstractReferenceCounted {
         () -> {
           try {
             out.close();
-            reporter.finished();
           } catch (IOException e) {
             logger.atWarning().withCause(e).log(
                 "Unexpected exception closing output stream after downloading %s/%d to %s",
                 digest.getHash(), digest.getSizeBytes(), path);
+          } finally {
+            reporter.finished();
           }
         },
         directExecutor());
@@ -365,7 +467,12 @@ public class RemoteCache extends AbstractReferenceCounted {
         downloads.add(Futures.immediateFailedFuture(e));
       }
     } else if (result.hasStdoutDigest()) {
-      downloads.add(downloadBlob(context, result.getStdoutDigest(), outErr.getOutputStream()));
+      downloads.add(
+          downloadBlob(
+              context,
+              /* blobName= */ "<stdout>",
+              result.getStdoutDigest(),
+              outErr.getOutputStream()));
     }
     if (!result.getStderrRaw().isEmpty()) {
       try {
@@ -375,7 +482,12 @@ public class RemoteCache extends AbstractReferenceCounted {
         downloads.add(Futures.immediateFailedFuture(e));
       }
     } else if (result.hasStderrDigest()) {
-      downloads.add(downloadBlob(context, result.getStderrDigest(), outErr.getErrorStream()));
+      downloads.add(
+          downloadBlob(
+              context,
+              /* blobName= */ "<stderr>",
+              result.getStderrDigest(),
+              outErr.getErrorStream()));
     }
     return downloads;
   }

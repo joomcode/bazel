@@ -17,6 +17,7 @@ package com.google.devtools.build.lib.bazel.bzlmod;
 
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.cmdline.Label;
 
 /**
  * Specifies that the module should:
@@ -31,8 +32,12 @@ import com.google.common.collect.ImmutableList;
 public abstract class SingleVersionOverride implements RegistryOverride {
 
   public static SingleVersionOverride create(
-      Version version, String registry, ImmutableList<String> patches, int patchStrip) {
-    return new AutoValue_SingleVersionOverride(version, registry, patches, patchStrip);
+      Version version,
+      String registry,
+      ImmutableList<Label> patches,
+      ImmutableList<String> patchCmds,
+      int patchStrip) {
+    return new AutoValue_SingleVersionOverride(version, registry, patches, patchCmds, patchStrip);
   }
 
   /**
@@ -44,8 +49,13 @@ public abstract class SingleVersionOverride implements RegistryOverride {
   @Override
   public abstract String getRegistry();
 
-  /** The patches to apply after retrieving per the registry. Should be a list of labels. */
-  public abstract ImmutableList<String> getPatches();
+  /** The labels of patches to apply after retrieving per the registry. */
+  public abstract ImmutableList<Label> getPatches();
+
+  /**
+   * The patch commands to execute after retrieving per the registry. Should be a list of commands.
+   */
+  public abstract ImmutableList<String> getPatchCmds();
 
   /** The number of path segments to strip from the paths in the supplied patches. */
   public abstract int getPatchStrip();

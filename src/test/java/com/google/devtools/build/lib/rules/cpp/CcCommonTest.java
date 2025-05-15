@@ -27,6 +27,7 @@ import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.AnalysisUtils;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.OutputGroupInfo;
+import com.google.devtools.build.lib.analysis.RunEnvironmentInfo;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
 import com.google.devtools.build.lib.analysis.util.AnalysisMock;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
@@ -36,12 +37,14 @@ import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.packages.util.Crosstool.CcToolchainConfig;
 import com.google.devtools.build.lib.packages.util.MockCcSupport;
+import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.ModifiedFileSet;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
 import java.util.List;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -187,7 +190,7 @@ public class CcCommonTest extends BuildViewTestCase {
   private Iterable<Artifact> getLinkerInputs(ConfiguredTarget target) {
     Artifact executable = getExecutable(target);
     CppLinkAction linkAction = (CppLinkAction) getGeneratingAction(executable);
-    return linkAction.getLinkCommandLine().getLinkerInputArtifacts().toList();
+    return linkAction.getLinkCommandLineForTesting().getLinkerInputArtifacts().toList();
   }
 
   @Test
@@ -201,7 +204,7 @@ public class CcCommonTest extends BuildViewTestCase {
 
     Artifact executable = getExecutable(archiveInSrcsTest);
     CppLinkAction linkAction = (CppLinkAction) getGeneratingAction(executable);
-    assertThat(linkAction.getLinkCommandLine().toString()).contains(" -larchive.34 ");
+    assertThat(linkAction.getLinkCommandLineForTesting().toString()).contains(" -larchive.34 ");
   }
 
   @Test
@@ -281,6 +284,24 @@ public class CcCommonTest extends BuildViewTestCase {
             "           defines = ['FOO=$(location //data)'])");
     assertThat(expandedDefines.get(CcInfo.PROVIDER).getCcCompilationContext().getDefines())
         .containsExactly("FOO=data/data.txt");
+  }
+
+  @Test
+  public void testExpandedDefinesDuplicateTargets() throws Exception {
+    scratch.file("data/BUILD", "cc_library(name = 'a', srcs = ['foo.cc'])");
+    ConfiguredTarget expandedDefines =
+        scratchConfiguredTarget(
+            "expanded_defines",
+            "expand_srcs",
+            "cc_library(name = 'expand_srcs',",
+            "           srcs = ['defines.cc'],",
+            "           data = ['//data:a'],",
+            "           deps = ['//data:a'],",
+            "           defines = ['FOO=$(location //data:a)'])");
+    String depPath =
+        getFilesToBuild(getConfiguredTarget("//data:a")).getSingleton().getExecPathString();
+    assertThat(expandedDefines.get(CcInfo.PROVIDER).getCcCompilationContext().getDefines())
+        .containsExactly(String.format("FOO=%s", depPath));
   }
 
   @Test
@@ -550,6 +571,7 @@ public class CcCommonTest extends BuildViewTestCase {
   }
 
   @Test
+  @Ignore("(b/484481656): Starlark does not support warnings.")
   public void testCcLibraryBadIncludesWarnedAndIgnored() throws Exception {
     checkWarning(
         "badincludes",
@@ -564,6 +586,7 @@ public class CcCommonTest extends BuildViewTestCase {
   }
 
   @Test
+  @Ignore("(b/484481656): Starlark does not support warnings.")
   public void testCcLibraryUplevelIncludesWarned() throws Exception {
     checkWarning(
         "third_party/uplevel",
@@ -626,7 +649,7 @@ public class CcCommonTest extends BuildViewTestCase {
         "third_party/root",
         "lib",
         // message:
-        "in includes attribute of cc_library rule //third_party/root:lib: '../..' resolves to the "
+        "attribute includes: '../..' resolves to the "
             + "workspace root, which would allow this rule and all of its transitive dependents to "
             + "include any file in your workspace. Please include only what you need",
         // build file:
@@ -687,13 +710,23 @@ public class CcCommonTest extends BuildViewTestCase {
 
   @Test
   public void testCcLibraryWithDashStaticOnDarwin() throws Exception {
-    getAnalysisMock().ccSupport().setupCcToolchainConfigForCpu(mockToolsConfig, "darwin");
-    useConfiguration("--cpu=darwin");
+    getAnalysisMock().ccSupport().setupCcToolchainConfigForCpu(mockToolsConfig, "darwin_x86_64");
+    mockToolsConfig.create(
+        "platforms/BUILD",
+        "platform(",
+        "  name = 'darwin_x86_64',",
+        "  constraint_values = [",
+        "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:macos',",
+        "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:x86_64',",
+        "  ],",
+        ")");
+    useConfiguration("--cpu=darwin_x86_64", "--platforms=//platforms:darwin_x86_64");
+
     checkError(
         "badlib",
         "lib_with_dash_static",
         // message:
-        "in linkopts attribute of cc_library rule //badlib:lib_with_dash_static: "
+        "in linkopts attribute of cc_library rule @@//badlib:lib_with_dash_static: "
             + "Apple builds do not support statically linked binaries",
         // build file:
         "cc_library(name = 'lib_with_dash_static',",
@@ -751,6 +784,7 @@ public class CcCommonTest extends BuildViewTestCase {
   }
 
   @Test
+  @Ignore("(b/484481656): Starlark does not support warnings.")
   public void testIncludeAbsoluteHeaders() throws Exception {
     checkWarning(
         "test",
@@ -795,7 +829,7 @@ public class CcCommonTest extends BuildViewTestCase {
     ConfiguredTarget target = getConfiguredTarget("//a:bin");
     CppLinkAction action =
         (CppLinkAction) getGeneratingAction(getFilesToBuild(target).getSingleton());
-    assertThat(MockCcSupport.getLinkopts(action.getLinkCommandLine()))
+    assertThat(MockCcSupport.getLinkopts(action.getLinkCommandLineForTesting()))
         .containsExactly(
             String.format(
                 "-Wl,@%s/a/a.lds",
@@ -803,6 +837,21 @@ public class CcCommonTest extends BuildViewTestCase {
                     .getGenfilesDirectory(RepositoryName.MAIN)
                     .getExecPath()
                     .getPathString()));
+  }
+
+  @Test
+  public void testExpandedEnv() throws Exception {
+    scratch.file(
+        "a/BUILD",
+        "genrule(name = 'linker', cmd='generate', outs=['a.lds'])",
+        "cc_test(",
+        "    name='bin_test',",
+        "    srcs=['b.cc'],",
+        "    env={'SOME_KEY': '-Wl,@$(location a.lds)'},",
+        "    deps=['a.lds'])");
+    ConfiguredTarget starlarkTarget = getConfiguredTarget("//a:bin_test");
+    RunEnvironmentInfo provider = starlarkTarget.get(RunEnvironmentInfo.PROVIDER);
+    assertThat(provider.getEnvironment()).containsEntry("SOME_KEY", "-Wl,@a/a.lds");
   }
 
   @Test
@@ -882,6 +931,21 @@ public class CcCommonTest extends BuildViewTestCase {
     assertThat(ActionsTestUtil.prettyArtifactNames(absolute.getDeclaredIncludeSrcs()))
         .containsExactly(
             "third_party/a/_virtual_includes/absolute/a/v1/b.h", "third_party/a/v1/b.h");
+  }
+
+  @Test
+  public void testEmptyPackageStripPrefix() throws Exception {
+    if (!AnalysisMock.get().isThisBazel()) {
+      return;
+    }
+    scratch.file(
+        "BUILD",
+        "licenses(['notice'])",
+        "cc_library(name='a', hdrs=['b.h'], strip_include_prefix='.')");
+    CcCompilationContext ccContext =
+        getConfiguredTarget("//:a").get(CcInfo.PROVIDER).getCcCompilationContext();
+    assertThat(ActionsTestUtil.prettyArtifactNames(ccContext.getDeclaredIncludeSrcs()))
+        .containsExactly("b.h");
   }
 
   @Test
@@ -1010,6 +1074,66 @@ public class CcCommonTest extends BuildViewTestCase {
   }
 
   @Test
+  public void testPreferPicForOptBinaryFeature() throws Exception {
+    getAnalysisMock()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder()
+                .withFeatures(
+                    CppRuleClasses.NO_LEGACY_FEATURES,
+                    CppRuleClasses.SUPPORTS_PIC,
+                    CppRuleClasses.PREFER_PIC_FOR_OPT_BINARIES)
+                .withActionConfigs(
+                    CppActionNames.CPP_LINK_STATIC_LIBRARY,
+                    CppActionNames.CPP_COMPILE,
+                    CppActionNames.CPP_LINK_NODEPS_DYNAMIC_LIBRARY));
+    useConfiguration("--cpu=k8", "--compilation_mode=opt");
+
+    scratch.file("x/BUILD", "cc_library(name = 'foo', srcs = ['a.cc'])");
+    scratch.file("x/a.cc");
+
+    RuleConfiguredTarget ccLibrary = (RuleConfiguredTarget) getConfiguredTarget("//x:foo");
+    ImmutableList<ActionAnalysisMetadata> actions = ccLibrary.getActions();
+    ImmutableList<String> outputs =
+        actions.stream()
+            .map(ActionAnalysisMetadata::getPrimaryOutput)
+            .map(Artifact::getFilename)
+            .collect(ImmutableList.toImmutableList());
+    assertThat(outputs).doesNotContain("a.o");
+    assertThat(outputs).contains("a.pic.o");
+  }
+
+  @Test
+  public void testPreferPicForOptBinaryFeatureNeedsPicSupport() throws Exception {
+    getAnalysisMock()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder()
+                .withFeatures(
+                    CppRuleClasses.NO_LEGACY_FEATURES, CppRuleClasses.PREFER_PIC_FOR_OPT_BINARIES)
+                .withActionConfigs(
+                    CppActionNames.CPP_LINK_STATIC_LIBRARY,
+                    CppActionNames.CPP_COMPILE,
+                    CppActionNames.CPP_LINK_NODEPS_DYNAMIC_LIBRARY));
+    useConfiguration("--cpu=k8", "--compilation_mode=opt");
+
+    scratch.file("x/BUILD", "cc_library(name = 'foo', srcs = ['a.cc'])");
+    scratch.file("x/a.cc");
+
+    RuleConfiguredTarget ccLibrary = (RuleConfiguredTarget) getConfiguredTarget("//x:foo");
+    ImmutableList<ActionAnalysisMetadata> actions = ccLibrary.getActions();
+    ImmutableList<String> outputs =
+        actions.stream()
+            .map(ActionAnalysisMetadata::getPrimaryOutput)
+            .map(Artifact::getFilename)
+            .collect(ImmutableList.toImmutableList());
+    assertThat(outputs).doesNotContain("a.pic.o");
+    assertThat(outputs).contains("a.o");
+  }
+
+  @Test
   public void testWhenSupportsPicNotPresentAndForcePicPassedIsError() throws Exception {
     reporter.removeHandler(failFastHandler);
     getAnalysisMock()
@@ -1047,6 +1171,24 @@ public class CcCommonTest extends BuildViewTestCase {
                 .map(x -> removeOutDirectory(x))
                 .collect(ImmutableList.toImmutableList()))
         .containsExactly("/usr/bin/mock-gcc", "@/k8-fastbuild/bin/a/_objs/foo/foo.o.params");
+  }
+
+  @Test
+  public void testCppCompileActionArgvIgnoreParamFile() throws Exception {
+    AnalysisMock.get()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder().withFeatures(CppRuleClasses.COMPILER_PARAM_FILE));
+    scratch.file("a/BUILD", "cc_library(name='foo', srcs=['foo.cc'])");
+    CppCompileAction cppCompileAction = getCppCompileAction("//a:foo");
+    ImmutableList<String> argv =
+        cppCompileAction.getStarlarkArgv().stream()
+            .map(x -> removeOutDirectory(x))
+            .collect(ImmutableList.toImmutableList());
+    assertThat(argv).contains("/usr/bin/mock-gcc");
+    assertThat(argv).contains("-o");
+    assertThat(argv).contains("/k8-fastbuild/bin/a/_objs/foo/foo.o");
   }
 
   @Test
@@ -1142,12 +1284,15 @@ public class CcCommonTest extends BuildViewTestCase {
         ")");
   }
 
-  private String removeOutDirectory(String s) {
+  private static String removeOutDirectory(String s) {
     return s.replace("blaze-out", "").replace("bazel-out", "");
   }
 
   @Test
   public void testNoCoptsDisabled() throws Exception {
+    if (analysisMock.isThisBazel()) {
+      return;
+    }
     reporter.removeHandler(failFastHandler);
     scratch.file("x/BUILD", "cc_library(name = 'foo', srcs = ['a.cc'], nocopts = 'abc')");
     useConfiguration("--incompatible_disable_nocopts");
@@ -1155,5 +1300,52 @@ public class CcCommonTest extends BuildViewTestCase {
     assertContainsEvent(
         "This attribute was removed. See https://github.com/bazelbuild/bazel/issues/8706 for"
             + " details.");
+  }
+
+  @Test
+  public void testLinkExtra() throws Exception {
+    ConfiguredTarget target =
+        scratchConfiguredTarget(
+            "mypackage",
+            "mybinary",
+            "cc_binary(name = 'mybinary',",
+            "          srcs = ['mybinary.cc'])");
+    List<String> artifactNames = baseArtifactNames(getLinkerInputs(target));
+    assertThat(artifactNames).contains("liblink_extra_lib.a");
+  }
+
+  @Test
+  public void testNoLinkExtra() throws Exception {
+    ConfiguredTarget target =
+        scratchConfiguredTarget(
+            "mypackage",
+            "mybinary",
+            "cc_library(name = 'empty_lib')",
+            "cc_binary(name = 'mybinary',",
+            "          srcs = ['mybinary.cc'],",
+            "          link_extra_lib = ':empty_lib')");
+    List<String> artifactNames = baseArtifactNames(getLinkerInputs(target));
+    assertThat(artifactNames).doesNotContain("liblink_extra_lib.a");
+  }
+
+  @Test
+  public void testGenerateLinkMap() throws Exception {
+    AnalysisMock.get()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder().withFeatures(CppRuleClasses.GENERATE_LINKMAP_FEATURE_NAME));
+    useConfiguration("--cpu=k8");
+    ConfiguredTarget generateLinkMapTest =
+        scratchConfiguredTarget(
+            "generate_linkmap",
+            "generate_linkmap_test",
+            "cc_binary(name = 'generate_linkmap_test',",
+            "          features = ['generate_linkmap'],",
+            "          srcs = ['generate_linkmap_test.cc'],",
+            "          )");
+    Iterable<String> temps =
+        ActionsTestUtil.baseArtifactNames(getOutputGroup(generateLinkMapTest, "linkmap"));
+    assertThat(temps).containsExactly("generate_linkmap_test.map");
   }
 }

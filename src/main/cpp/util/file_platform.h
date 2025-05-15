@@ -48,6 +48,12 @@ class IFileMtime {
   // Returns true if the mtime was changed successfully.
   virtual bool SetToNow(const Path &path) = 0;
 
+  // Attempt to set the mtime of file under `path` to the current time.
+  //
+  // Returns true if the mtime was changed successfully OR if setting the mtime
+  // failed due to permissions errors.
+  virtual bool SetToNowIfPossible(const Path &path) = 0;
+
   // Sets the mtime of file under `path` to the distant future.
   // "Distant future" should be on the order of some years into the future, like
   // a decade.
@@ -90,7 +96,11 @@ int ReadFromHandle(file_handle_type handle, void *data, size_t size,
 // Replaces 'content' with contents of file 'filename'.
 // If `max_size` is positive, the method reads at most that many bytes;
 // otherwise the method reads the whole file.
+// If fails to read content from the file, `error_message` can provide extra
+// information about the failure.
 // Returns false on error. Can be called from a signal handler.
+bool ReadFile(const std::string &filename, std::string *content,
+              std::string *error_message, int max_size = 0);
 bool ReadFile(const std::string &filename, std::string *content,
               int max_size = 0);
 bool ReadFile(const Path &path, std::string *content, int max_size = 0);
@@ -121,6 +131,11 @@ struct WriteResult {
     BROKEN_PIPE = 2,  // EPIPE (reading end of the pipe is closed)
   };
 };
+
+// Initializes stdout and stderr for writing UTF-8 (best effort).
+//
+// This should be called once during startup.
+void InitializeStdOutErrForUtf8();
 
 // Writes `size` bytes from `data` into stdout/stderr.
 // Writes to stdout if `to_stdout` is true, writes to stderr otherwise.

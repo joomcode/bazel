@@ -15,17 +15,27 @@
 
 package com.google.devtools.build.lib.bazel.bzlmod;
 
+import static java.util.stream.Collectors.joining;
+
 import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.bazel.bzlmod.InterimModule.DepSpec;
 import com.google.devtools.build.lib.bazel.bzlmod.ModuleFileValue.RootModuleFileValue;
+import com.google.devtools.build.lib.bazel.repository.downloader.Checksum;
+import com.google.devtools.build.lib.server.FailureDetails;
 import com.google.devtools.build.skyframe.SkyFunction.Environment;
-import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyKey;
-import com.google.devtools.build.skyframe.SkyframeIterableResult;
+import com.google.devtools.build.skyframe.SkyframeLookupResult;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Queue;
+import java.util.SequencedMap;
 import java.util.Set;
 import javax.annotation.Nullable;
 
@@ -37,40 +47,86 @@ import javax.annotation.Nullable;
 final class Discovery {
   private Discovery() {}
 
+  public record Result(
+      ImmutableMap<ModuleKey, InterimModule> depGraph,
+      ImmutableMap<String, Optional<Checksum>> registryFileHashes) {}
+
   /**
    * Runs module discovery. This function follows SkyFunction semantics (returns null if a Skyframe
    * dependency is missing and this function needs a restart).
    */
   @Nullable
-  public static ImmutableMap<ModuleKey, Module> run(Environment env, RootModuleFileValue root)
-      throws SkyFunctionException, InterruptedException {
+  public static Result run(Environment env, RootModuleFileValue root)
+      throws InterruptedException, ExternalDepsException {
     String rootModuleName = root.getModule().getName();
     ImmutableMap<String, ModuleOverride> overrides = root.getOverrides();
-    Map<ModuleKey, Module> depGraph = new HashMap<>();
-    depGraph.put(ModuleKey.ROOT, rewriteDepKeys(root.getModule(), overrides, rootModuleName));
+    Map<ModuleKey, InterimModule> depGraph = new HashMap<>();
+    depGraph.put(
+        ModuleKey.ROOT,
+        root.getModule()
+            .withDepSpecsTransformed(InterimModule.applyOverrides(overrides, rootModuleName)));
     Queue<ModuleKey> unexpanded = new ArrayDeque<>();
+    Map<ModuleKey, ModuleKey> predecessors = new HashMap<>();
+    SequencedMap<String, Optional<Checksum>> registryFileHashes =
+        new LinkedHashMap<>(root.getRegistryFileHashes());
     unexpanded.add(ModuleKey.ROOT);
     while (!unexpanded.isEmpty()) {
-      Set<SkyKey> unexpandedSkyKeys = new HashSet<>();
+      Set<SkyKey> unexpandedSkyKeys = new LinkedHashSet<>();
       while (!unexpanded.isEmpty()) {
-        Module module = depGraph.get(unexpanded.remove());
-        for (ModuleKey depKey : module.getDeps().values()) {
-          if (depGraph.containsKey(depKey)) {
+        InterimModule module = depGraph.get(unexpanded.remove());
+        for (DepSpec depSpec : module.getDeps().values()) {
+          if (depGraph.containsKey(depSpec.toModuleKey())) {
             continue;
           }
-          unexpandedSkyKeys.add(ModuleFileValue.key(depKey, overrides.get(depKey.getName())));
+          predecessors.putIfAbsent(depSpec.toModuleKey(), module.getKey());
+          unexpandedSkyKeys.add(
+              ModuleFileValue.key(depSpec.toModuleKey(), overrides.get(depSpec.getName())));
         }
       }
-      SkyframeIterableResult result = env.getOrderedValuesAndExceptions(unexpandedSkyKeys);
+      SkyframeLookupResult result = env.getValuesAndExceptions(unexpandedSkyKeys);
       for (SkyKey skyKey : unexpandedSkyKeys) {
         ModuleKey depKey = ((ModuleFileValue.Key) skyKey).getModuleKey();
-        ModuleFileValue moduleFileValue = (ModuleFileValue) result.next();
+        ModuleFileValue moduleFileValue;
+        try {
+          moduleFileValue =
+              (ModuleFileValue) result.getOrThrow(skyKey, ExternalDepsException.class);
+        } catch (ExternalDepsException e) {
+          if (e.getDetailedExitCode().getFailureDetail() == null
+              || e.getDetailedExitCode().getFailureDetail().getExternalDeps().getCode()
+                  != FailureDetails.ExternalDeps.Code.BAD_MODULE) {
+            // This is not due to a bad module, so don't print a dependency chain. This covers cases
+            // such as a parse error in the lockfile or an I/O exception during registry access,
+            // which aren't related to any particular module dep.
+            throw e;
+          }
+          // Trace back a dependency chain to the root module. There can be multiple paths to the
+          // failing module, but any of those is useful for debugging.
+          List<ModuleKey> depChain = new ArrayList<>();
+          depChain.add(depKey);
+          ModuleKey predecessor = depKey;
+          while ((predecessor = predecessors.get(predecessor)) != null) {
+            depChain.add(predecessor);
+          }
+          Collections.reverse(depChain);
+          String depChainString =
+              depChain.stream().map(ModuleKey::toString).collect(joining(" -> "));
+          throw ExternalDepsException.withCauseAndMessage(
+              FailureDetails.ExternalDeps.Code.BAD_MODULE,
+              e,
+              "in module dependency chain %s",
+              depChainString);
+        }
         if (moduleFileValue == null) {
           // Don't return yet. Try to expand any other unexpanded nodes before returning.
           depGraph.put(depKey, null);
         } else {
           depGraph.put(
-              depKey, rewriteDepKeys(moduleFileValue.getModule(), overrides, rootModuleName));
+              depKey,
+              moduleFileValue
+                  .getModule()
+                  .withDepSpecsTransformed(
+                      InterimModule.applyOverrides(overrides, rootModuleName)));
+          registryFileHashes.putAll(moduleFileValue.getRegistryFileHashes());
           unexpanded.add(depKey);
         }
       }
@@ -78,29 +134,6 @@ final class Discovery {
     if (env.valuesMissing()) {
       return null;
     }
-    return ImmutableMap.copyOf(depGraph);
-  }
-
-  private static Module rewriteDepKeys(
-      Module module, ImmutableMap<String, ModuleOverride> overrides, String rootModuleName) {
-    return module.withDepKeysTransformed(
-        depKey -> {
-          if (rootModuleName.equals(depKey.getName())) {
-            return ModuleKey.ROOT;
-          }
-
-          Version newVersion = depKey.getVersion();
-          @Nullable ModuleOverride override = overrides.get(depKey.getName());
-          if (override instanceof NonRegistryOverride) {
-            newVersion = Version.EMPTY;
-          } else if (override instanceof SingleVersionOverride) {
-            Version overrideVersion = ((SingleVersionOverride) override).getVersion();
-            if (!overrideVersion.isEmpty()) {
-              newVersion = overrideVersion;
-            }
-          }
-
-          return ModuleKey.create(depKey.getName(), newVersion);
-        });
+    return new Result(ImmutableMap.copyOf(depGraph), ImmutableMap.copyOf(registryFileHashes));
   }
 }

@@ -47,6 +47,7 @@ import com.google.devtools.build.lib.runtime.commands.info.InstallBaseInfoItem;
 import com.google.devtools.build.lib.runtime.commands.info.JavaHomeInfoItem;
 import com.google.devtools.build.lib.runtime.commands.info.JavaRuntimeInfoItem;
 import com.google.devtools.build.lib.runtime.commands.info.JavaVirtualMachineInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.LocalResourcesInfoItem;
 import com.google.devtools.build.lib.runtime.commands.info.MakeInfoItem;
 import com.google.devtools.build.lib.runtime.commands.info.MaxHeapSizeInfoItem;
 import com.google.devtools.build.lib.runtime.commands.info.OutputBaseInfoItem;
@@ -58,6 +59,7 @@ import com.google.devtools.build.lib.runtime.commands.info.ServerPidInfoItem;
 import com.google.devtools.build.lib.runtime.commands.info.StarlarkSemanticsInfoItem;
 import com.google.devtools.build.lib.runtime.commands.info.UsedHeapSizeAfterGcInfoItem;
 import com.google.devtools.build.lib.runtime.commands.info.UsedHeapSizeInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.WorkerMetricsInfoItem;
 import com.google.devtools.build.lib.runtime.commands.info.WorkspaceInfoItem;
 import com.google.devtools.build.lib.server.FailureDetails;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
@@ -69,7 +71,6 @@ import com.google.devtools.build.lib.util.io.OutErr;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
-import com.google.devtools.common.options.OptionMetadataTag;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParsingResult;
 import java.io.IOException;
@@ -105,22 +106,12 @@ public class InfoCommand implements BlazeCommand {
   /** Options for the info command. */
   public static class Options extends OptionsBase {
     @Option(
-      name = "show_make_env",
-      defaultValue = "false",
-      documentationCategory = OptionDocumentationCategory.LOGGING,
-      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.TERMINAL_OUTPUT},
-      help = "Include the \"Make\" environment in the output."
-    )
+        name = "show_make_env",
+        defaultValue = "false",
+        documentationCategory = OptionDocumentationCategory.LOGGING,
+        effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.TERMINAL_OUTPUT},
+        help = "Include the \"Make\" environment in the output.")
     public boolean showMakeEnvironment;
-
-    @Option(
-        name = "experimental_supports_info_crosstool_configuration",
-        defaultValue = "true",
-        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-        effectTags = {OptionEffectTag.UNKNOWN},
-        metadataTags = {OptionMetadataTag.HIDDEN},
-        help = "Noop.")
-    public boolean experimentalSupportsInfoCrosstoolConfiguration;
   }
 
   /**
@@ -189,16 +180,7 @@ public class InfoCommand implements BlazeCommand {
         }
       }
 
-      List<String> starlarkOptions = optionsParsingResult.getSkippedArgs();
       List<String> residue = optionsParsingResult.getResidue();
-      if (!starlarkOptions.isEmpty()) {
-        env.getReporter()
-            .handle(
-                Event.warn(
-                    "info command does not support starlark options. Ignoring options: "
-                        + starlarkOptions));
-      }
-
       env.getEventBus().post(new NoBuildEvent());
       if (!residue.isEmpty()) {
         ImmutableSet.Builder<String> unknownKeysBuilder = ImmutableSet.builder();
@@ -230,7 +212,7 @@ public class InfoCommand implements BlazeCommand {
               FailureDetails.InfoCommand.Code.KEY_NOT_RECOGNIZED);
         }
       } else { // print them all
-        configurationSupplier.get();  // We'll need this later anyway
+        var unused = configurationSupplier.get(); // We'll need this later anyway
         for (InfoItem infoItem : items.values()) {
           if (infoItem.isHidden()) {
             continue;
@@ -300,7 +282,9 @@ public class InfoCommand implements BlazeCommand {
             new DefaultsPackageInfoItem(),
             new BuildLanguageInfoItem(),
             new DefaultPackagePathInfoItem(commandOptions),
-            new StarlarkSemanticsInfoItem(commandOptions));
+            new StarlarkSemanticsInfoItem(commandOptions),
+            new WorkerMetricsInfoItem(),
+            new LocalResourcesInfoItem());
     ImmutableMap.Builder<String, InfoItem> result = new ImmutableMap.Builder<>();
     for (InfoItem item : hardwiredInfoItems) {
       result.put(item.getName(), item);

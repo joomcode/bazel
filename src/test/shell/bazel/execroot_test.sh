@@ -21,7 +21,7 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${CURRENT_DIR}/../integration_test_setup.sh" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
 
-function test_execroot_structure() {
+function test_execroot_structure_without_bzlmod() {
   ws_name="dooby_dooby_doo"
   cat > WORKSPACE <<EOF
 workspace(name = "$ws_name")
@@ -37,11 +37,37 @@ genrule(
 )
 EOF
 
-  bazel build -s //dir:use-srcs &> $TEST_log || fail "expected success"
-  execroot="$(bazel info execution_root)"
+  bazel build --noenable_bzlmod -s //dir:use-srcs &> $TEST_log || fail "expected success"
+  execroot="$(bazel info --noenable_bzlmod execution_root)"
   test -e "$execroot/../${ws_name}"
   ls -l bazel-out | tee out
   assert_contains "$(dirname $execroot)/${ws_name}/bazel-out" out
+}
+
+function test_execroot_structure_with_bzlmod() {
+  cat > WORKSPACE <<EOF
+workspace(name = "whatever_doesnt_matter")
+EOF
+  cat > MODULE.bazel <<EOF
+module(name="this_also_doesnt_matter")
+EOF
+
+  mkdir dir
+  cat > dir/BUILD <<'EOF'
+genrule(
+  name = "use-srcs",
+  srcs = ["BUILD"],
+  cmd = "cp $< $@",
+  outs = ["used-srcs"],
+)
+EOF
+
+  bazel build --enable_bzlmod -s //dir:use-srcs &> $TEST_log \
+      || fail "expected success"
+  execroot="$(bazel info --enable_bzlmod execution_root)"
+  test -e "$execroot/../_main"
+  ls -l bazel-out | tee out
+  assert_contains "$(dirname $execroot)/_main/bazel-out" out
 }
 
 function test_sibling_repository_layout() {
@@ -146,6 +172,7 @@ EOF
 
 function test_external_directory_globs() {
   touch WORKSPACE
+  touch MODULE.bazel
 
   mkdir -p external/a external/c
   echo file_ab > external/a/b

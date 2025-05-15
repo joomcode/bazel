@@ -25,6 +25,7 @@ import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.actions.ArtifactRoot.RootType;
 import com.google.devtools.build.lib.actions.RunfilesSupplier;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
+import com.google.devtools.build.lib.analysis.config.BuildConfigurationValue.RunfileSymlinksMode;
 import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
@@ -55,36 +56,12 @@ public final class SingleRunfilesSupplierTest {
         new SingleRunfilesSupplier(
             PathFragment.create("notimportant"),
             mkRunfiles(artifacts),
-            /*manifest=*/ null,
-            /*buildRunfileLinks=*/ false,
-            /*runfileLinksEnabled=*/ false);
+            /* repoMappingManifest= */ null,
+            RunfileSymlinksMode.SKIP,
+            /* buildRunfileLinks= */ false,
+            /* runfilesMiddleman= */ null);
 
     assertThat(underTest.getArtifacts().toList()).containsExactlyElementsIn(artifacts);
-  }
-
-  @Test
-  public void testGetManifestsWhenNone() {
-    RunfilesSupplier underTest =
-        new SingleRunfilesSupplier(
-            PathFragment.create("ignored"),
-            Runfiles.EMPTY,
-            /*manifest=*/ null,
-            /*buildRunfileLinks=*/ false,
-            /*runfileLinksEnabled=*/ false);
-    assertThat(underTest.getManifests()).isEmpty();
-  }
-
-  @Test
-  public void testGetManifestsWhenSupplied() {
-    Artifact manifest = ActionsTestUtil.createArtifact(rootDir, "manifest");
-    RunfilesSupplier underTest =
-        new SingleRunfilesSupplier(
-            PathFragment.create("ignored"),
-            Runfiles.EMPTY,
-            manifest,
-            /*buildRunfileLinks=*/ false,
-            /*runfileLinksEnabled=*/ false);
-    assertThat(underTest.getManifests()).containsExactly(manifest);
   }
 
   @Test
@@ -93,9 +70,10 @@ public final class SingleRunfilesSupplierTest {
         new SingleRunfilesSupplier(
             PathFragment.create("old"),
             Runfiles.EMPTY,
-            ActionsTestUtil.createArtifact(rootDir, "manifest"),
-            /*buildRunfileLinks=*/ false,
-            /*runfileLinksEnabled=*/ false);
+            /* repoMappingManifest= */ null,
+            RunfileSymlinksMode.SKIP,
+            /* buildRunfileLinks= */ false,
+            /* runfilesMiddleman= */ null);
     PathFragment newDir = PathFragment.create("new");
 
     RunfilesSupplier overridden = original.withOverriddenRunfilesDir(newDir);
@@ -104,7 +82,6 @@ public final class SingleRunfilesSupplierTest {
     assertThat(overridden.getMappings())
         .containsExactly(newDir, Iterables.getOnlyElement(original.getMappings().values()));
     assertThat(overridden.getArtifacts()).isEqualTo(original.getArtifacts());
-    assertThat(overridden.getManifests()).isEqualTo(original.getManifests());
   }
 
   @Test
@@ -114,9 +91,10 @@ public final class SingleRunfilesSupplierTest {
         new SingleRunfilesSupplier(
             dir,
             Runfiles.EMPTY,
-            ActionsTestUtil.createArtifact(rootDir, "manifest"),
-            /*buildRunfileLinks=*/ false,
-            /*runfileLinksEnabled=*/ false);
+            /* repoMappingManifest= */ null,
+            RunfileSymlinksMode.SKIP,
+            /* buildRunfileLinks= */ false,
+            /* runfilesMiddleman= */ null);
     assertThat(original.withOverriddenRunfilesDir(dir)).isSameInstanceAs(original);
   }
 
@@ -126,12 +104,17 @@ public final class SingleRunfilesSupplierTest {
     Runfiles runfiles = mkRunfiles(mkArtifacts("a", "b", "c"));
     SingleRunfilesSupplier underTest =
         SingleRunfilesSupplier.createCaching(
-            dir, runfiles, /*buildRunfileLinks=*/ false, /*runfileLinksEnabled=*/ false);
+            dir,
+            runfiles,
+            /* repoMappingManifest= */ null,
+            RunfileSymlinksMode.SKIP,
+            /* buildRunfileLinks= */ false,
+            /* runfilesMiddleman= */ null);
 
     Map<PathFragment, Map<PathFragment, Artifact>> mappings1 = underTest.getMappings();
     Map<PathFragment, Map<PathFragment, Artifact>> mappings2 = underTest.getMappings();
 
-    assertThat(mappings1).containsExactly(dir, runfiles.getRunfilesInputs(null, null));
+    assertThat(mappings1).containsExactly(dir, runfiles.getRunfilesInputs(null, null, null));
     assertThat(mappings1).isEqualTo(mappings2);
     assertThat(mappings1.get(dir)).isSameInstanceAs(mappings2.get(dir));
   }
@@ -143,14 +126,19 @@ public final class SingleRunfilesSupplierTest {
     Runfiles runfiles = mkRunfiles(mkArtifacts("a", "b", "c"));
     SingleRunfilesSupplier original =
         SingleRunfilesSupplier.createCaching(
-            oldDir, runfiles, /*buildRunfileLinks=*/ false, /*runfileLinksEnabled=*/ false);
-    SingleRunfilesSupplier overriden = original.withOverriddenRunfilesDir(newDir);
+            oldDir,
+            runfiles,
+            /* repoMappingManifest= */ null,
+            RunfileSymlinksMode.SKIP,
+            /* buildRunfileLinks= */ false,
+            /* runfilesMiddleman= */ null);
+    SingleRunfilesSupplier overridden = original.withOverriddenRunfilesDir(newDir);
 
     Map<PathFragment, Map<PathFragment, Artifact>> mappingsOld = original.getMappings();
-    Map<PathFragment, Map<PathFragment, Artifact>> mappingsNew = overriden.getMappings();
+    Map<PathFragment, Map<PathFragment, Artifact>> mappingsNew = overridden.getMappings();
 
-    assertThat(mappingsOld).containsExactly(oldDir, runfiles.getRunfilesInputs(null, null));
-    assertThat(mappingsNew).containsExactly(newDir, runfiles.getRunfilesInputs(null, null));
+    assertThat(mappingsOld).containsExactly(oldDir, runfiles.getRunfilesInputs(null, null, null));
+    assertThat(mappingsNew).containsExactly(newDir, runfiles.getRunfilesInputs(null, null, null));
     assertThat(mappingsOld.get(newDir)).isSameInstanceAs(mappingsNew.get(oldDir));
   }
 

@@ -25,11 +25,13 @@ import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.EmptyRunfilesSupplier;
 import com.google.devtools.build.lib.actions.FilesetOutputSymlink;
+import com.google.devtools.build.lib.actions.PathMapper;
 import com.google.devtools.build.lib.actions.ResourceSet;
 import com.google.devtools.build.lib.actions.RunfilesSupplier;
 import com.google.devtools.build.lib.actions.SimpleSpawn;
 import com.google.devtools.build.lib.actions.Spawn;
 import com.google.devtools.build.lib.analysis.platform.PlatformInfo;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.util.ArrayList;
@@ -44,6 +46,7 @@ public final class SpawnBuilder {
   private String mnemonic = "Mnemonic";
   private String progressMessage = "progress message";
   private String ownerLabel = "//dummy:label";
+  private String ownerRuleKind = "dummy-target-kind";
   @Nullable private Artifact ownerPrimaryOutput;
   @Nullable private PlatformInfo platform;
   private final List<String> args;
@@ -59,6 +62,8 @@ public final class SpawnBuilder {
 
   private RunfilesSupplier runfilesSupplier = EmptyRunfilesSupplier.INSTANCE;
   private ResourceSet resourceSet = ResourceSet.ZERO;
+  private PathMapper pathMapper = PathMapper.NOOP;
+  private boolean builtForToolConfiguration;
 
   public SpawnBuilder(String... args) {
     this.args = ImmutableList.copyOf(args);
@@ -67,7 +72,14 @@ public final class SpawnBuilder {
   public Spawn build() {
     ActionExecutionMetadata owner =
         new FakeOwner(
-            mnemonic, progressMessage, ownerLabel, ownerPrimaryOutput, platform, execProperties);
+            mnemonic,
+            progressMessage,
+            ownerLabel,
+            ownerRuleKind,
+            ownerPrimaryOutput,
+            platform,
+            execProperties,
+            builtForToolConfiguration);
     return new SimpleSpawn(
         owner,
         ImmutableList.copyOf(args),
@@ -79,7 +91,8 @@ public final class SpawnBuilder {
         tools.build(),
         ImmutableSet.copyOf(outputs),
         mandatoryOutputs,
-        resourceSet);
+        resourceSet,
+        pathMapper);
   }
 
   @CanIgnoreReturnValue
@@ -103,6 +116,12 @@ public final class SpawnBuilder {
   @CanIgnoreReturnValue
   public SpawnBuilder withOwnerLabel(String ownerLabel) {
     this.ownerLabel = checkNotNull(ownerLabel);
+    return this;
+  }
+
+  @CanIgnoreReturnValue
+  public SpawnBuilder withOwnerRuleKind(String ownerRuleKind) {
+    this.ownerRuleKind = checkNotNull(ownerRuleKind);
     return this;
   }
 
@@ -143,10 +162,24 @@ public final class SpawnBuilder {
   }
 
   @CanIgnoreReturnValue
+  public SpawnBuilder withInputs(ActionInput... inputs) {
+    for (var input : inputs) {
+      this.inputs.add(input);
+    }
+    return this;
+  }
+
+  @CanIgnoreReturnValue
   public SpawnBuilder withInputs(String... names) {
     for (String name : names) {
       this.inputs.add(ActionInputHelper.fromPath(name));
     }
+    return this;
+  }
+
+  @CanIgnoreReturnValue
+  public SpawnBuilder withInputs(NestedSet<ActionInput> inputs) {
+    this.inputs.addTransitive(inputs);
     return this;
   }
 
@@ -203,8 +236,34 @@ public final class SpawnBuilder {
   }
 
   @CanIgnoreReturnValue
+  public SpawnBuilder withTools(ActionInput... tools) {
+    for (ActionInput tool : tools) {
+      this.tools.add(tool);
+    }
+    return this;
+  }
+
+  @CanIgnoreReturnValue
+  public SpawnBuilder withTools(NestedSet<ActionInput> tools) {
+    this.tools.addTransitive(tools);
+    return this;
+  }
+
+  @CanIgnoreReturnValue
   public SpawnBuilder withLocalResources(ResourceSet resourceSet) {
     this.resourceSet = resourceSet;
+    return this;
+  }
+
+  @CanIgnoreReturnValue
+  public SpawnBuilder setPathMapper(PathMapper pathMapper) {
+    this.pathMapper = pathMapper;
+    return this;
+  }
+
+  @CanIgnoreReturnValue
+  public SpawnBuilder setBuiltForToolConfiguration(boolean builtForToolConfiguration) {
+    this.builtForToolConfiguration = builtForToolConfiguration;
     return this;
   }
 }

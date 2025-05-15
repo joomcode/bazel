@@ -13,15 +13,20 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.MutableClassToInstanceMap;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
+import com.google.common.graph.Graph;
 import com.google.common.graph.GraphBuilder;
 import com.google.common.graph.ImmutableGraph;
+import com.google.common.graph.MutableGraph;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.events.Reportable;
-import com.google.devtools.build.lib.util.GroupedList;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import java.io.IOException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import javax.annotation.Nullable;
 
@@ -43,7 +48,9 @@ public interface SkyFunction {
    *
    * <p>This method should return a non-{@code null} value, or {@code null} if any dependencies were
    * missing ({@link Environment#valuesMissing} was true before returning). In that case the missing
-   * dependencies will be computed and the {@code compute} method called again.
+   * dependencies will be computed and the {@code compute} method called again. A subsequent
+   * invocation of this method after missing dependencies are done is commonly referred to as a
+   * <em>Skyframe restart</em> (not to be confused with {@link Reset}).
    *
    * <p>This method should throw if it fails, or if one of its dependencies fails with an exception
    * and this method cannot recover. If one of its dependencies fails and this method can enrich the
@@ -58,7 +65,7 @@ public interface SkyFunction {
    * possible) exception enrichment logic simple enough to be insensitive to the evaluating thread's
    * interrupt state.
    *
-   * <p>This method may return {@link Restart} in rare circumstances. See its docs. Do not return
+   * <p>This method may return {@link Reset} in rare circumstances. See its docs. Do not return
    * values of this type unless you know exactly what you are doing.
    *
    * <p>If version information is discovered for the given {@code skyKey}, {@link
@@ -85,10 +92,31 @@ public interface SkyFunction {
   }
 
   /**
+   * Returns the max transitive source version that would be injected via {@link
+   * SkyFunctionEnvironment#injectVersionForNonHermeticFunction} if {@link #compute(SkyKey,
+   * Environment)} were invoked for the given {@link SkyKey}/{@link SkyValue} pair, or null if no
+   * call for version injection would be made.
+   */
+  @Nullable
+  default Version getMaxTransitiveSourceVersionToInjectForNonHermeticFunction(
+      SkyKey skyKey, SkyValue skyValue) throws IOException {
+    checkState(skyKey.functionName().getHermeticity() == FunctionHermeticity.HERMETIC);
+    return null;
+  }
+
+  /**
    * Sentinel {@link SkyValue} type for {@link #compute} to return, indicating that something went
-   * wrong, and that the evaluation returning this value must be restarted, and the nodes associated
+   * wrong, and that the evaluation should be started over (including calling {@link
+   * NodeEntry#resetEvaluationFromScratch}).
+   *
+   * <p>Returning a {@link Reset} from {@link #compute} differs from returning {@code null}. A
+   * {@code null} return is expected under normal circumstances when a dependency is requested but
+   * is not yet done, causing Skyframe to restart the function when all requested dependencies are
+   * done. A {@link Reset} signals a more severe issue that requires clearing the associated node's
+   * temporary direct deps and {@linkplain NodeEntry.DirtyType#REWIND rewinding} nodes associated
    * with other keys in {@link #rewindGraph()} (whose directed edges should correspond to the nodes'
-   * direct dependencies) must also be restarted.
+   * direct dependencies). Rewound dependency nodes are re-evaluated before the function is
+   * attempted again.
    *
    * <p>An intended cause for returning this is external data loss; e.g., if a dependency's
    * "done-ness" is intended to mean that certain data is available in an external system, but
@@ -96,37 +124,49 @@ public interface SkyFunction {
    * reevaluation of the dependency is expected to repair the discrepancy.
    *
    * <p>Values of this type will <em>never</em> be returned by {@link Environment}'s getValue
-   * methods or from {@link NodeEntry#getValue()}.
+   * methods or from {@link NodeEntry#getValue}.
    *
    * <p>All {@link ListenableFuture}s used in calls to {@link Environment#dependOnFuture} which were
    * not already complete will be cancelled.
-   *
-   * <p>This may only be returned by {@link #compute} if {@link Environment#restartPermitted} is
-   * true. If restarting is not permitted, {@link #compute} should throw an appropriate {@link
-   * SkyFunctionException}.
    */
-  interface Restart extends SkyValue {
-    ImmutableGraph<SkyKey> EMPTY_SKYKEY_GRAPH =
-        ImmutableGraph.copyOf(GraphBuilder.directed().allowsSelfLoops(false).build());
+  final class Reset implements SkyValue {
 
-    Restart SELF = () -> EMPTY_SKYKEY_GRAPH;
-
-    static Restart selfAnd(ImmutableGraph<SkyKey> rewindGraph) {
-      Preconditions.checkArgument(
-          rewindGraph.isDirected(), "rewindGraph undirected: %s", rewindGraph);
-      Preconditions.checkArgument(
-          !rewindGraph.allowsSelfLoops(), "rewindGraph allows self loops: %s", rewindGraph);
-      return () -> rewindGraph;
+    /**
+     * Convenience method that creates a {@link MutableGraph} that fulfills the basic requirements
+     * of a {@link Reset}.
+     *
+     * <p>Additional edges may be added to the graph before passing to {@link #of}.
+     */
+    public static MutableGraph<SkyKey> newRewindGraphFor(SkyKey keyToReset) {
+      MutableGraph<SkyKey> rewindGraph = GraphBuilder.directed().allowsSelfLoops(false).build();
+      rewindGraph.addNode(keyToReset);
+      return rewindGraph;
     }
 
-    ImmutableGraph<SkyKey> rewindGraph();
+    public static Reset of(Graph<SkyKey> rewindGraph) {
+      checkArgument(rewindGraph.isDirected(), "Undirected: %s", rewindGraph);
+      checkArgument(!rewindGraph.allowsSelfLoops(), "Allows self loops: %s", rewindGraph);
+      checkArgument(!rewindGraph.nodes().isEmpty(), "Rewind graph must include key to reset");
+      return new Reset(ImmutableGraph.copyOf(rewindGraph));
+    }
+
+    private final ImmutableGraph<SkyKey> rewindGraph;
+
+    private Reset(ImmutableGraph<SkyKey> rewindGraph) {
+      this.rewindGraph = rewindGraph;
+    }
+
+    ImmutableGraph<SkyKey> rewindGraph() {
+      return rewindGraph;
+    }
   }
 
   /**
-   * The services provided to the {@link SkyFunction#compute} implementation by the Skyframe
-   * evaluation framework.
+   * Value lookup subset of services provided to {@link SkyFunction} implementations.
+   *
+   * <p>See {@link Environment} for the full set of services.
    */
-  interface Environment {
+  interface LookupEnvironment {
     /**
      * Returns a direct dependency. If the specified value is not in the set of already evaluated
      * direct dependencies, returns {@code null}. Also returns {@code null} if the specified value
@@ -134,13 +174,14 @@ public interface SkyFunction {
      *
      * <p>On a subsequent evaluation, if any of this value's dependencies have changed they will be
      * re-evaluated in the same order as originally requested by the {@code SkyFunction} using this
-     * {@code getValue} call (see {@link #getOrderedValuesAndExceptions} for when preserving the
-     * order is not important).
+     * {@code getValue} call (see {@link #getValuesAndExceptions} for when preserving the order is
+     * not important).
      *
      * <p>This method and the ones below may throw {@link InterruptedException}. Such exceptions
      * must not be caught by the {@link SkyFunction#compute} implementation. Instead, they should be
      * propagated up to the caller of {@link SkyFunction#compute}.
      */
+    @CanIgnoreReturnValue
     @Nullable
     SkyValue getValue(SkyKey valueName) throws InterruptedException;
 
@@ -158,15 +199,18 @@ public interface SkyFunction {
      * or a subtype of {@link InterruptedException}. See {@link
      * SkyFunctionException#validateExceptionType} for details.
      */
+    @CanIgnoreReturnValue
     @Nullable
     <E extends Exception> SkyValue getValueOrThrow(SkyKey depKey, Class<E> exceptionClass)
         throws E, InterruptedException;
 
+    @CanIgnoreReturnValue
     @Nullable
     <E1 extends Exception, E2 extends Exception> SkyValue getValueOrThrow(
         SkyKey depKey, Class<E1> exceptionClass1, Class<E2> exceptionClass2)
         throws E1, E2, InterruptedException;
 
+    @CanIgnoreReturnValue
     @Nullable
     <E1 extends Exception, E2 extends Exception, E3 extends Exception> SkyValue getValueOrThrow(
         SkyKey depKey,
@@ -175,6 +219,7 @@ public interface SkyFunction {
         Class<E3> exceptionClass3)
         throws E1, E2, E3, InterruptedException;
 
+    @CanIgnoreReturnValue
     @Nullable
     <E1 extends Exception, E2 extends Exception, E3 extends Exception, E4 extends Exception>
         SkyValue getValueOrThrow(
@@ -190,15 +235,15 @@ public interface SkyFunction {
      * be thought of as a "dependency group" -- they are requested together by this value.
      *
      * <p>In general, if the result of one getValue call can affect the argument of a later getValue
-     * call, the two calls cannot be merged into a single getOrderedValuesAndExceptions call, since
-     * the result of the first call might change on a later evaluation. Inversely, if the result of
-     * one getValue call cannot affect the parameters of the next getValue call, the two keys can
-     * form a dependency group and the two getValue calls should be merged into one
-     * getOrderedValuesAndExceptions call. In the latter case, if we fail to combine the _multiple_
-     * getValue (or getOrderedValuesAndExceptions) calls into one _single_
-     * getOrderedValuesAndExceptions call, it would result in multiple dependency groups with an
-     * implicit ordering between them. This would unnecessarily cause sequential evaluations of
-     * these groups and could impact overall performance.
+     * call, the two calls cannot be merged into a single getValuesAndExceptions call, since the
+     * result of the first call might change on a later evaluation. Inversely, if the result of one
+     * getValue call cannot affect the parameters of the next getValue call, the two keys can form a
+     * dependency group and the two getValue calls should be merged into one getValuesAndExceptions
+     * call. In the latter case, if we fail to combine the _multiple_ getValue (or
+     * getValuesAndExceptions) calls into one _single_ getValuesAndExceptions call, it would result
+     * in multiple dependency groups with an implicit ordering between them. This would
+     * unnecessarily cause sequential evaluations of these groups and could impact overall
+     * performance.
      *
      * <p>On subsequent evaluations, when checking to see if dependencies require re-evaluation, all
      * the values within one group may be simultaneously checked. A SkyFunction should request a
@@ -213,58 +258,63 @@ public interface SkyFunction {
      * value, will request all values in the group again anyway, so they would have to have been
      * built in any case.
      *
-     * <p>Example of when to use getOrderedValuesAndExceptions: A ListProcessor value is built with
-     * key inputListRef. The {@link #compute} method first calls
-     * getValue(InputList.key(inputListRef)), and retrieves inputList. It then iterates through
-     * inputList, calling getValue on each input. Finally, it processes the whole list and returns.
-     * Say inputList is (a, b, c). Since the {@link #compute} method will unconditionally call
-     * getValue(a), getValue(b), and getValue (c), the {@link #compute} method can instead just call
-     * getOrderedValuesAndExceptions({a, b, c}). If the value is later dirtied the evaluator will
-     * evaluate a, b, and c in parallel (assuming the inputList value was unchanged), and
-     * re-evaluate the ListProcessor value only if at least one of them was changed. On the other
-     * hand, if the InputList changes to be (a, b, d), then the evaluator will see that the first
-     * dep has changed, and call the {@link #compute} method to re-evaluate from scratch, without
-     * considering the dep group of {a, b, c}.
+     * <p>Example of when to use getValuesAndExceptions: A ListProcessor value is built with key
+     * inputListRef. The {@link #compute} method first calls getValue(InputList.key(inputListRef)),
+     * and retrieves inputList. It then iterates through inputList, calling getValue on each input.
+     * Finally, it processes the whole list and returns. Say inputList is (a, b, c). Since the
+     * {@link #compute} method will unconditionally call getValue(a), getValue(b), and getValue(c),
+     * the {@link #compute} method can instead just call getValuesAndExceptions({a, b, c}). If the
+     * value is later dirtied the evaluator will evaluate a, b, and c in parallel (assuming the
+     * inputList value was unchanged), and re-evaluate the ListProcessor value only if at least one
+     * of them was changed. On the other hand, if the InputList changes to be (a, b, d), then the
+     * evaluator will see that the first dep has changed, and call the {@link #compute} method to
+     * re-evaluate from scratch, without considering the dep group of {a, b, c}.
      *
-     * <p>Example of when not to use getOrderedValuesAndExceptions: A BestMatch value is built with
-     * key &lt;potentialMatchesRef, matchCriterion&gt;. The {@link #compute} method first calls
+     * <p>Example of when not to use getValuesAndExceptions: A BestMatch value is built with key
+     * &lt;potentialMatchesRef, matchCriterion&gt;. The {@link #compute} method first calls
      * getValue(PotentialMatches.key(potentialMatchesRef) and retrieves potentialMatches. It then
      * iterates through potentialMatches, calling getValue on each potential match until it finds
      * one that satisfies matchCriterion. In this case, if potentialMatches is (a, b, c), it would
-     * be <i>incorrect</i> to call getOrderedValuesAndExceptions({a, b, c}), because it is not known
-     * yet whether requesting b or c will be necessary -- if a matches, then we will never call b or
-     * c.
+     * be <i>incorrect</i> to call getValuesAndExceptions({a, b, c}), because it is not known yet
+     * whether requesting b or c will be necessary -- if a matches, then we will never call b or c.
      *
-     * <p>Returns a {@link SkyframeIterableResult}, which contains the results in the same order as
-     * {@code depKeys}.
+     * <p>Returns a {@link SkyframeLookupResult}, which allows the calling {@code SkyFunction} to
+     * get a value or throw an exception per SkyKey.
      */
-    SkyframeIterableResult getOrderedValuesAndExceptions(Iterable<? extends SkyKey> depKeys)
-        throws InterruptedException;
-
-    /**
-     * Similar to {@link #getOrderedValuesAndExceptions}, but returns a {@link
-     * SkyframeLookupResult}, which allows the calling {@code SkyFunction} to get value or throw
-     * exception per SkyKey.
-     *
-     * <p>Use {@link #getOrderedValuesAndExceptions} in preference, since it creates less garbage.
-     */
+    @CanIgnoreReturnValue
     SkyframeLookupResult getValuesAndExceptions(Iterable<? extends SkyKey> depKeys)
         throws InterruptedException;
 
+    /**
+     * Returns a lookup result containing previously requested dependencies.
+     *
+     * <p>NB: this may contain fewer dependencies than expected if the node is restarted before all
+     * its dependencies have signaled. The two known cases are error bubbling and partial
+     * re-evaluation. In error bubbling, an error should be present.
+     */
+    SkyframeLookupResult getLookupHandleForPreviouslyRequestedDeps();
+  }
+
+  /**
+   * The services provided to the {@link SkyFunction#compute} implementation by the Skyframe
+   * evaluation framework.
+   */
+  interface Environment extends LookupEnvironment {
     /**
      * Returns whether there was a previous getValue[s][OrThrow] that indicated a missing
      * dependency. Formally, returns true iff at least one of the following occurred:
      *
      * <ul>
      *   <li>getValue[OrThrow](k[, c]) returned {@code null} for some k
-     *   <li>A call to result#next[OrThrow]([c]) returned {@code null} where result =
-     *       getOrderedValuesAndExceptions(ks) for some ks
-     *   <li>A call to result#get[OrThrow](k[, c]) returned {@code null} where result =
+     *   <li>A call to {@code result#get[OrThrow](k[, c])} returned {@code null} where result =
+     *       getValuesAndExceptions(ks) for some ks
+     *   <li>A call to {@code result#queryDep(k, cb)} returned {@code false} where result =
      *       getValuesAndExceptions(ks) for some ks
      * </ul>
      *
      * <p>If this returns true, the {@link SkyFunction} must return {@code null} or throw a {@link
-     * SkyFunctionException} if it detected an error even with values missing.
+     * SkyFunctionException}. It should do the latter only if it encountered an error (on its own or
+     * from a dependency) and wants to convey that error.
      */
     boolean valuesMissing();
 
@@ -291,7 +341,7 @@ public interface SkyFunction {
      * you're doing!
      */
     @Nullable
-    default GroupedList<SkyKey> getTemporaryDirectDeps() {
+    default GroupedDeps getTemporaryDirectDeps() {
       return null;
     }
 
@@ -330,6 +380,7 @@ public interface SkyFunction {
      * may be called upon to transform a lower-level exception. This method can tell it whether to
      * transform a dependency's exception or ignore it and return a value as usual.
      */
+    // TODO: Rename this as it can be called for other purposes.
     boolean inErrorBubblingForSkyFunctionsThatCanFullyRecoverFromErrors();
 
     /**
@@ -349,25 +400,41 @@ public interface SkyFunction {
     void dependOnFuture(ListenableFuture<?> future);
 
     /**
-     * A {@link SkyFunction#compute} call may return {@link Restart} only if this returns {@code
-     * true}.
-     */
-    boolean restartPermitted();
-
-    /**
      * Container for data stored in between calls to {@link #compute} for the same {@link SkyKey}.
      *
      * <p>See the javadoc of {@link #getState} for motivation and an example.
      */
-    interface SkyKeyComputeState {}
+    interface SkyKeyComputeState extends AutoCloseable {
+      /**
+       * {@inheritDoc}
+       *
+       * <p>Can be overridden to make sure {@link SkyKeyComputeState} objects are cleaned up. Note
+       * that, while this ostensibly opens up the possibility for {@link SkyKeyComputeState} to hold
+       * on to any kind of external resource, doing so might still be dangerous as we only actively
+       * drop {@link SkyKeyComputeState} objects on high memory pressure. If the external resource
+       * being held on to is approaching starvation, we currently don't do anything to alleviate
+       * that pressure. So think *hard* before you start doing that!
+       *
+       * <p>Implementations <strong>MUST</strong> be idempotent.
+       *
+       * <p>Note also that this method could be invoked from arbitrary threads, so avoid heavy
+       * operations if possible.
+       */
+      @Override
+      default void close() {}
+    }
 
     /**
      * Canonical type-safe heterogeneous container for use with {@link #getState} in SkyFunction
      * implementations that employ complex or abstract compositional strategies.
      */
+    // Must be threadsafe: used by PartialReevaluationMailbox#from on multiple threads, to save
+    // signals from deps.
+    @ThreadSafe
     class ClassToInstanceMapSkyKeyComputeState implements SkyKeyComputeState {
-      private final MutableClassToInstanceMap<SkyKeyComputeState> map =
-          MutableClassToInstanceMap.create();
+
+      private final ConcurrentHashMap<Class<? extends SkyKeyComputeState>, SkyKeyComputeState> map =
+          new ConcurrentHashMap<>();
 
       public <T extends SkyKeyComputeState> T getInstance(
           Class<T> type, Supplier<T> stateSupplier) {
@@ -435,9 +502,12 @@ public interface SkyFunction {
      * above example was just illustrating the best-case outcome. Therefore, {@link SkyFunction}
      * implementations should make use of this feature only as a performance optimization.
      *
-     * <p>A notable example of the above note is that if {@link #compute} returns a {@link Restart}
+     * <p>Note that {@link SkyKeyComputeState#close()} allows us to hold on to other kinds of
+     * external resources and clean them up when necessary, but see the Javadoc there for caveats.
+     *
+     * <p>A notable example of the above note is that if {@link #compute} returns a {@link Reset}
      * then a call to {@link #getState} on the subsequent call to {@link #compute} will definitely
-     * use the {@code stateSupplier}. It's important that Skyframe do this because {@link Restart}
+     * use the {@code stateSupplier}. It's important that Skyframe do this because {@link Reset}
      * indicates that work should be redone, and so it'd be wrong to reuse work from the previous
      * {@link #compute} call.
      */

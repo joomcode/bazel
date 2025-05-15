@@ -40,9 +40,10 @@ class ParallelEvaluatorContext {
   private final Version minimalVersion;
   private final ImmutableMap<SkyFunctionName, SkyFunction> skyFunctions;
   private final ExtendedEventHandler reporter;
+  private final EmittedEventState emittedEventState;
   private final NestedSetVisitor<Reportable> replayingNestedSetEventVisitor;
   private final boolean keepGoing;
-  private final DirtyTrackingProgressReceiver progressReceiver;
+  private final InflightTrackingProgressReceiver progressReceiver;
   private final EventFilter storedEventFilter;
   private final ErrorInfoManager errorInfoManager;
   private final GraphInconsistencyReceiver graphInconsistencyReceiver;
@@ -57,17 +58,10 @@ class ParallelEvaluatorContext {
    */
   private final Supplier<NodeEntryVisitor> visitorSupplier;
 
-  /**
-   * Returns a {@link Runnable} given a {@code key} to evaluate and an {@code evaluationPriority}
-   * indicating whether it should be scheduled for evaluation soon (higher is better). The returned
-   * {@link Runnable} is a {@link ComparableRunnable} so that it can be ordered by {@code
-   * evaluationPriority} in a priority queue if needed.
-   */
+  /** * Returns a {@link Runnable} given a {@code key} to evaluate. */
   interface RunnableMaker {
-    ComparableRunnable make(SkyKey key, int evaluationPriority);
+    Runnable make(SkyKey key);
   }
-
-  interface ComparableRunnable extends Runnable, Comparable<ComparableRunnable> {}
 
   public ParallelEvaluatorContext(
       QueryableGraph graph,
@@ -75,9 +69,9 @@ class ParallelEvaluatorContext {
       Version minimalVersion,
       ImmutableMap<SkyFunctionName, SkyFunction> skyFunctions,
       ExtendedEventHandler reporter,
-      NestedSetVisitor.VisitedState emittedEventState,
+      EmittedEventState emittedEventState,
       boolean keepGoing,
-      DirtyTrackingProgressReceiver progressReceiver,
+      InflightTrackingProgressReceiver progressReceiver,
       EventFilter storedEventFilter,
       ErrorInfoManager errorInfoManager,
       GraphInconsistencyReceiver graphInconsistencyReceiver,
@@ -90,6 +84,7 @@ class ParallelEvaluatorContext {
     this.skyFunctions = skyFunctions;
     this.reporter = reporter;
     this.graphInconsistencyReceiver = graphInconsistencyReceiver;
+    this.emittedEventState = emittedEventState;
     this.replayingNestedSetEventVisitor =
         new NestedSetVisitor<>(new NestedSetEventReceiver(reporter), emittedEventState);
     this.keepGoing = keepGoing;
@@ -118,18 +113,15 @@ class ParallelEvaluatorContext {
     }
   }
 
-  /**
-   * Signals all parents that this node is finished and enqueues any parents that are ready at the
-   * given evaluation priority.
-   */
-  void signalParentsAndEnqueueIfReady(
-      SkyKey skyKey, Set<SkyKey> parents, Version version, int evaluationPriority)
+  /** Signals all parents that this node is finished and enqueues any parents that are ready. */
+  void signalParentsAndEnqueueIfReady(SkyKey skyKey, Set<SkyKey> parents, Version version)
       throws InterruptedException {
     NodeBatch batch = graph.getBatch(skyKey, Reason.SIGNAL_DEP, parents);
     for (SkyKey parent : parents) {
       NodeEntry entry = checkNotNull(batch.get(parent), parent);
-      if (entry.signalDep(version, skyKey)) {
-        getVisitor().enqueueEvaluation(parent, evaluationPriority);
+      boolean evaluationRequired = entry.signalDep(version, skyKey);
+      if (evaluationRequired || parent.supportsPartialReevaluation()) {
+        getVisitor().enqueueEvaluation(parent, skyKey);
       }
     }
   }
@@ -154,12 +146,16 @@ class ParallelEvaluatorContext {
     return visitorSupplier.get();
   }
 
-  DirtyTrackingProgressReceiver getProgressReceiver() {
+  InflightTrackingProgressReceiver getProgressReceiver() {
     return progressReceiver;
   }
 
   GraphInconsistencyReceiver getGraphInconsistencyReceiver() {
     return graphInconsistencyReceiver;
+  }
+
+  EmittedEventState getEmittedEventState() {
+    return emittedEventState;
   }
 
   NestedSetVisitor<Reportable> getReplayingNestedSetEventVisitor() {
@@ -180,10 +176,6 @@ class ParallelEvaluatorContext {
 
   ErrorInfoManager getErrorInfoManager() {
     return errorInfoManager;
-  }
-
-  boolean restartPermitted() {
-    return graphInconsistencyReceiver.restartPermitted();
   }
 
   boolean mergingSkyframeAnalysisExecutionPhases() {

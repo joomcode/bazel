@@ -51,7 +51,7 @@ def split_escaped(string, delimiter):
       Basic usage:
         split_escaped("a:b:c", ":") -> [ "a", "b", "c" ]
 
-      Delimeter that is not supposed to be splitten on has to be %-escaped:
+      Delimiter that is not supposed to be splitten on has to be %-escaped:
         split_escaped("a%:b", ":") -> [ "a:b" ]
 
       Literal % can be represented by escaping it as %%:
@@ -148,7 +148,8 @@ def execute(
         repository_ctx,
         command,
         environment = None,
-        expect_failure = False):
+        expect_failure = False,
+        expect_empty_output = False):
     """Execute a command, return stdout if succeed and throw an error if it fails. Doesn't %-escape the result!"""
     if environment:
         result = repository_ctx.execute(command, environment = environment)
@@ -171,10 +172,15 @@ def execute(
                 ),
             )
     stripped_stdout = result.stdout.strip()
-    if not stripped_stdout:
-        auto_configure_fail(
-            "empty output from command %s, stderr: (%s)" % (command, result.stderr),
-        )
+    if expect_empty_output != (not stripped_stdout):
+        if expect_empty_output:
+            auto_configure_fail(
+                "non-empty output from command %s, stdout: (%s), stderr: (%s)" % (command, result.stdout, result.stderr),
+            )
+        else:
+            auto_configure_fail(
+                "empty output from command %s, stderr: (%s)" % (command, result.stderr),
+            )
     return stripped_stdout
 
 def get_cpu_value(repository_ctx):
@@ -183,7 +189,7 @@ def get_cpu_value(repository_ctx):
     arch = repository_ctx.os.arch
     if os_name.startswith("mac os"):
         # Check if we are on x86_64 or arm64 and return the corresponding cpu value.
-        return "darwin" + ("_arm64" if arch == "aarch64" else "")
+        return "darwin_" + ("arm64" if arch == "aarch64" else "x86_64")
     if os_name.find("freebsd") != -1:
         return "freebsd"
     if os_name.find("openbsd") != -1:

@@ -20,15 +20,67 @@ import java.io.IOException;
 
 /** Prefetches files to local disk. */
 public interface ActionInputPrefetcher {
+  /**
+   * Returns the metadata for an {@link ActionInput}.
+   *
+   * <p>This will generally call through to a {@link InputMetadataProvider} and ask for the metadata
+   * of either an input or an output artifact.
+   */
+  public interface MetadataSupplier {
+    FileArtifactValue getMetadata(ActionInput actionInput) throws IOException, InterruptedException;
+  }
+
   public static final ActionInputPrefetcher NONE =
       new ActionInputPrefetcher() {
         @Override
         public ListenableFuture<Void> prefetchFiles(
-            Iterable<? extends ActionInput> inputs, MetadataProvider metadataProvider) {
+            ActionExecutionMetadata action,
+            Iterable<? extends ActionInput> inputs,
+            MetadataSupplier metadataSupplier,
+            Priority priority,
+            Reason reason) {
           // Do nothing.
           return immediateVoidFuture();
         }
+
+        @Override
+        public boolean requiresTreeMetadataWhenTreeFileIsInput() {
+          return false;
+        }
       };
+
+  /** Priority for the staging task. */
+  public enum Priority {
+    /**
+     * Critical priority tasks are tasks that are critical to the execution time e.g. staging files
+     * for in-process actions.
+     */
+    CRITICAL,
+    /**
+     * High priority tasks are tasks that may have impact on the execution time e.g. staging outputs
+     * that are inputs to local actions which will be executed later.
+     */
+    HIGH,
+    /**
+     * Medium priority tasks are tasks that may or may not have the impact on the execution time
+     * e.g. staging inputs for local branch of dynamically scheduled actions.
+     */
+    MEDIUM,
+    /**
+     * Low priority tasks are tasks that don't have impact on the execution time e.g. staging
+     * outputs of toplevel targets/aspects.
+     */
+    LOW,
+  }
+
+  /** The reason for prefetching. */
+  enum Reason {
+    /** The requested files are needed as inputs to the given action. */
+    INPUTS,
+
+    /** The requested files are requested as outputs of the given action. */
+    OUTPUTS,
+  }
 
   /**
    * Initiates best-effort prefetching of all given inputs.
@@ -38,5 +90,15 @@ public interface ActionInputPrefetcher {
    * @return future success if prefetch is finished or {@link IOException}.
    */
   ListenableFuture<Void> prefetchFiles(
-      Iterable<? extends ActionInput> inputs, MetadataProvider metadataProvider);
+      ActionExecutionMetadata action,
+      Iterable<? extends ActionInput> inputs,
+      MetadataSupplier metadataSupplier,
+      Priority priority,
+      Reason reason);
+
+  /**
+   * Whether the prefetcher requires the metadata for a tree artifact to be available whenever one
+   * of the files in the tree artifact is an action input.
+   */
+  boolean requiresTreeMetadataWhenTreeFileIsInput();
 }

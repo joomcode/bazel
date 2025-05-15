@@ -20,6 +20,24 @@ load(":armeabi_cc_toolchain_config.bzl", "armeabi_cc_toolchain_config")
 
 package(default_visibility = ["//visibility:public"])
 
+cc_library(name = "empty_lib")
+
+# Label flag for extra libraries to be linked into every binary.
+# TODO(bazel-team): Support passing flag multiple times to build a list.
+label_flag(
+    name = "link_extra_libs",
+    build_setting_default = ":empty_lib",
+)
+
+# The final extra library to be linked into every binary target. This collects
+# the above flag, but may also include more libraries depending on config.
+cc_library(
+    name = "link_extra_lib",
+    deps = [
+        ":link_extra_libs",
+    ],
+)
+
 cc_library(
     name = "malloc",
 )
@@ -211,6 +229,7 @@ cc_toolchain_config(
     default_link_flags = ["/MACHINE:X64"],
     dbg_mode_debug_flag = "%{dbg_mode_debug_flag_x64}",
     fastbuild_mode_debug_flag = "%{fastbuild_mode_debug_flag_x64}",
+    supports_parse_showincludes = %{msvc_parse_showincludes_x64},
 )
 
 toolchain(
@@ -277,6 +296,7 @@ cc_toolchain_config(
     default_link_flags = ["/MACHINE:X86"],
     dbg_mode_debug_flag = "%{dbg_mode_debug_flag_x86}",
     fastbuild_mode_debug_flag = "%{fastbuild_mode_debug_flag_x86}",
+    supports_parse_showincludes = %{msvc_parse_showincludes_x86},
 )
 
 toolchain(
@@ -343,6 +363,7 @@ cc_toolchain_config(
     default_link_flags = ["/MACHINE:ARM"],
     dbg_mode_debug_flag = "%{dbg_mode_debug_flag_arm}",
     fastbuild_mode_debug_flag = "%{fastbuild_mode_debug_flag_arm}",
+    supports_parse_showincludes = %{msvc_parse_showincludes_arm},
 )
 
 toolchain(
@@ -409,6 +430,7 @@ cc_toolchain_config(
     default_link_flags = ["/MACHINE:ARM64"],
     dbg_mode_debug_flag = "%{dbg_mode_debug_flag_arm64}",
     fastbuild_mode_debug_flag = "%{fastbuild_mode_debug_flag_arm64}",
+    supports_parse_showincludes = %{msvc_parse_showincludes_arm64},
 )
 
 toolchain(
@@ -472,9 +494,10 @@ cc_toolchain_config(
         "strip": "wrapper/bin/msvc_nop.bat",
     },
     archiver_flags = ["/MACHINE:X64"],
-    default_link_flags = ["/MACHINE:X64", "/DEFAULTLIB:clang_rt.builtins-x86_64.lib"],
+    default_link_flags = ["/MACHINE:X64"],
     dbg_mode_debug_flag = "%{clang_cl_dbg_mode_debug_flag_x64}",
     fastbuild_mode_debug_flag = "%{clang_cl_fastbuild_mode_debug_flag_x64}",
+    supports_parse_showincludes = %{clang_cl_parse_showincludes_x64},
 )
 
 toolchain(
@@ -542,6 +565,7 @@ cc_toolchain_config(
     default_link_flags = ["/MACHINE:ARM64"],
     dbg_mode_debug_flag = "%{clang_cl_dbg_mode_debug_flag_arm64}",
     fastbuild_mode_debug_flag = "%{clang_cl_fastbuild_mode_debug_flag_arm64}",
+    supports_parse_showincludes = %{clang_cl_parse_showincludes_arm64},
 )
 
 toolchain(

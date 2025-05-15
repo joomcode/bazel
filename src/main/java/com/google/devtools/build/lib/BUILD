@@ -38,24 +38,24 @@ filegroup(
         "//src/main/java/com/google/devtools/build/lib/authandtls:srcs",
         "//src/main/java/com/google/devtools/build/lib/bazel:srcs",
         "//src/main/java/com/google/devtools/build/lib/bugreport:srcs",
-        "//src/main/java/com/google/devtools/build/lib/buildeventservice/client:srcs",
         "//src/main/java/com/google/devtools/build/lib/buildeventservice:srcs",
+        "//src/main/java/com/google/devtools/build/lib/buildeventservice/client:srcs",
+        "//src/main/java/com/google/devtools/build/lib/buildeventstream:srcs",
         "//src/main/java/com/google/devtools/build/lib/buildeventstream/proto:srcs",
         "//src/main/java/com/google/devtools/build/lib/buildeventstream/transports:srcs",
-        "//src/main/java/com/google/devtools/build/lib/buildeventstream:srcs",
         "//src/main/java/com/google/devtools/build/lib/causes:srcs",
         "//src/main/java/com/google/devtools/build/lib/clock:srcs",
         "//src/main/java/com/google/devtools/build/lib/cmdline:srcs",
+        "//src/main/java/com/google/devtools/build/lib/collect:srcs",
         "//src/main/java/com/google/devtools/build/lib/collect/compacthashmap:srcs",
         "//src/main/java/com/google/devtools/build/lib/collect/compacthashset:srcs",
         "//src/main/java/com/google/devtools/build/lib/collect/nestedset:srcs",
-        "//src/main/java/com/google/devtools/build/lib/collect:srcs",
         "//src/main/java/com/google/devtools/build/lib/concurrent:srcs",
         "//src/main/java/com/google/devtools/build/lib/dynamic:srcs",
         "//src/main/java/com/google/devtools/build/lib/events:srcs",
         "//src/main/java/com/google/devtools/build/lib/exec:srcs",
-        "//src/main/java/com/google/devtools/build/lib/io:srcs",
         "//src/main/java/com/google/devtools/build/lib/graph:srcs",
+        "//src/main/java/com/google/devtools/build/lib/io:srcs",
         "//src/main/java/com/google/devtools/build/lib/jni:srcs",
         "//src/main/java/com/google/devtools/build/lib/metrics:srcs",
         "//src/main/java/com/google/devtools/build/lib/network:srcs",
@@ -64,15 +64,14 @@ filegroup(
         "//src/main/java/com/google/devtools/build/lib/packages/semantics:srcs",
         "//src/main/java/com/google/devtools/build/lib/pkgcache:srcs",
         "//src/main/java/com/google/devtools/build/lib/platform:srcs",
-        "//src/main/java/com/google/devtools/build/lib/profiler/callcounts:srcs",
-        "//src/main/java/com/google/devtools/build/lib/profiler/memory:srcs",
         "//src/main/java/com/google/devtools/build/lib/profiler:srcs",
+        "//src/main/java/com/google/devtools/build/lib/profiler/memory:srcs",
+        "//src/main/java/com/google/devtools/build/lib/query2:srcs",
         "//src/main/java/com/google/devtools/build/lib/query2/common:srcs",
         "//src/main/java/com/google/devtools/build/lib/query2/compat:srcs",
         "//src/main/java/com/google/devtools/build/lib/query2/engine:srcs",
         "//src/main/java/com/google/devtools/build/lib/query2/query/aspectresolvers:srcs",
         "//src/main/java/com/google/devtools/build/lib/query2/query/output:srcs",
-        "//src/main/java/com/google/devtools/build/lib/query2:srcs",
         "//src/main/java/com/google/devtools/build/lib/remote:srcs",
         "//src/main/java/com/google/devtools/build/lib/repository:srcs",
         "//src/main/java/com/google/devtools/build/lib/rules:srcs",
@@ -83,16 +82,11 @@ filegroup(
         "//src/main/java/com/google/devtools/build/lib/server:srcs",
         "//src/main/java/com/google/devtools/build/lib/shell:srcs",
         "//src/main/java/com/google/devtools/build/lib/skyframe:srcs",
+        "//src/main/java/com/google/devtools/build/lib/standalone:srcs",
         "//src/main/java/com/google/devtools/build/lib/starlarkbuildapi:srcs",
         "//src/main/java/com/google/devtools/build/lib/starlarkdebug/module:srcs",
         "//src/main/java/com/google/devtools/build/lib/starlarkdebug/proto:srcs",
         "//src/main/java/com/google/devtools/build/lib/starlarkdebug/server:srcs",
-        "//src/main/java/net/starlark/java/annot/processor:srcs",
-        "//src/main/java/net/starlark/java/annot:srcs",
-        "//src/main/java/net/starlark/java/eval:srcs",
-        "//src/main/java/net/starlark/java/syntax:srcs",
-        "//src/main/java/net/starlark/java:srcs",
-        "//src/main/java/com/google/devtools/build/lib/standalone:srcs",
         "//src/main/java/com/google/devtools/build/lib/supplier:srcs",
         "//src/main/java/com/google/devtools/build/lib/testing/common:srcs",
         "//src/main/java/com/google/devtools/build/lib/testing/vfs:srcs",
@@ -100,12 +94,18 @@ filegroup(
         "//src/main/java/com/google/devtools/build/lib/unsafe:srcs",
         "//src/main/java/com/google/devtools/build/lib/util:srcs",
         "//src/main/java/com/google/devtools/build/lib/versioning:srcs",
-        "//src/main/java/com/google/devtools/build/lib/vfs/inmemoryfs:srcs",
         "//src/main/java/com/google/devtools/build/lib/vfs:srcs",
+        "//src/main/java/com/google/devtools/build/lib/vfs/bazel:srcs",
+        "//src/main/java/com/google/devtools/build/lib/vfs/inmemoryfs:srcs",
         "//src/main/java/com/google/devtools/build/lib/windows:srcs",
         "//src/main/java/com/google/devtools/build/lib/worker:srcs",
         "//src/main/java/com/google/devtools/build/skyframe:srcs",
         "//src/main/java/com/google/devtools/common/options:srcs",
+        "//src/main/java/net/starlark/java:srcs",
+        "//src/main/java/net/starlark/java/annot:srcs",
+        "//src/main/java/net/starlark/java/annot/processor:srcs",
+        "//src/main/java/net/starlark/java/eval:srcs",
+        "//src/main/java/net/starlark/java/syntax:srcs",
     ],
     visibility = [
         "//src:__pkg__",
@@ -187,14 +187,15 @@ java_library(
     deps = [
         "//src/main/java/com/google/devtools/build/lib/bugreport",
         "//src/main/java/com/google/devtools/build/lib/concurrent",
+        "//src/main/java/com/google/devtools/build/lib/server:idle_task",
         "//src/main/java/com/google/devtools/build/lib/util:crash_failure_details",
         "//src/main/java/com/google/devtools/build/lib/util:detailed_exit_code",
         "//src/main/java/com/google/devtools/build/lib/util:exit_code",
-        "//src/main/protobuf:any_java_proto",
         "//src/main/protobuf:command_server_java_proto",
         "//src/main/protobuf:failure_details_java_proto",
         "//third_party:guava",
         "//third_party:jsr305",
+        "@com_google_protobuf//java/core",
     ],
 )
 
@@ -216,19 +217,28 @@ java_library(
         ":runtime/blaze_command_result",
         "//src/main/java/com/google/devtools/build/lib/util",
         "//src/main/java/com/google/devtools/build/lib/util/io:out-err",
-        "//src/main/protobuf:any_java_proto",
         "//src/main/protobuf:invocation_policy_java_proto",
+        "@com_google_protobuf//java/core",
     ],
 )
 
 java_library(
-    name = "runtime/memory_pressure_event",
+    name = "runtime/memory_pressure",
     srcs = [
+        "runtime/GcThrashingDetector.java",
         "runtime/MemoryPressureEvent.java",
+        "runtime/MemoryPressureOptions.java",
+        "runtime/MemoryPressureStatCollector.java",
     ],
     deps = [
+        "//src/main/java/com/google/devtools/build/lib/bugreport",
+        "//src/main/java/com/google/devtools/build/lib/clock",
+        "//src/main/java/com/google/devtools/common/options",
+        "//src/main/protobuf:memory_pressure_java_proto",
         "//third_party:auto_value",
+        "//third_party:flogger",
         "//third_party:guava",
+        "//third_party:jsr305",
     ],
 )
 
@@ -246,6 +256,23 @@ java_library(
 )
 
 java_library(
+    name = "starlark_options_parser",
+    srcs = ["runtime/StarlarkOptionsParser.java"],
+    deps = [
+        "//src/main/java/com/google/devtools/build/lib/analysis:config/core_option_converters",
+        "//src/main/java/com/google/devtools/build/lib/cmdline",
+        "//src/main/java/com/google/devtools/build/lib/events",
+        "//src/main/java/com/google/devtools/build/lib/packages",
+        "//src/main/java/com/google/devtools/build/lib/util:pair",
+        "//src/main/java/com/google/devtools/build/lib/vfs:pathfragment",
+        "//src/main/java/com/google/devtools/common/options",
+        "//third_party:error_prone_annotations",
+        "//third_party:guava",
+        "//third_party:jsr305",
+    ],
+)
+
+java_library(
     name = "runtime",
     srcs = glob(
         [
@@ -259,8 +286,13 @@ java_library(
             "runtime/BlazeCommandResult.java",
             "runtime/CommandDispatcher.java",
             "runtime/CommandLinePathFactory.java",
+            "runtime/GcThrashingDetector.java",
             "runtime/KeepGoingOption.java",
             "runtime/LoadingPhaseThreadsOption.java",
+            "runtime/MemoryPressureEvent.java",
+            "runtime/MemoryPressureOptions.java",
+            "runtime/MemoryPressureStatCollector.java",
+            "runtime/StarlarkOptionsParser.java",
         ],
     ),
     deps = [
@@ -271,8 +303,11 @@ java_library(
         ":runtime/blaze_command_result",
         ":runtime/command_dispatcher",
         ":runtime/command_line_path_factory",
+        ":runtime/memory_pressure",
+        ":starlark_options_parser",
         "//src/main/java/com/google/devtools/build/lib/actions",
         "//src/main/java/com/google/devtools/build/lib/actions:action_lookup_data",
+        "//src/main/java/com/google/devtools/build/lib/actions:action_output_directory_helper",
         "//src/main/java/com/google/devtools/build/lib/actions:artifacts",
         "//src/main/java/com/google/devtools/build/lib/actions:commandline_item",
         "//src/main/java/com/google/devtools/build/lib/actions:execution_requirements",
@@ -281,9 +316,13 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/actions:middleman_type",
         "//src/main/java/com/google/devtools/build/lib/actions:package_roots",
         "//src/main/java/com/google/devtools/build/lib/actions:resource_manager",
+        "//src/main/java/com/google/devtools/build/lib/actions:runfiles_supplier",
+        "//src/main/java/com/google/devtools/build/lib/actions:shared_action_event",
+        "//src/main/java/com/google/devtools/build/lib/analysis:actions/abstract_file_write_action",
         "//src/main/java/com/google/devtools/build/lib/analysis:analysis_cluster",
         "//src/main/java/com/google/devtools/build/lib/analysis:analysis_options",
         "//src/main/java/com/google/devtools/build/lib/analysis:analysis_phase_complete_event",
+        "//src/main/java/com/google/devtools/build/lib/analysis:aspect_collection",
         "//src/main/java/com/google/devtools/build/lib/analysis:blaze_directories",
         "//src/main/java/com/google/devtools/build/lib/analysis:blaze_version_info",
         "//src/main/java/com/google/devtools/build/lib/analysis:build_info_event",
@@ -298,8 +337,10 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/analysis:file_provider",
         "//src/main/java/com/google/devtools/build/lib/analysis:no_build_event",
         "//src/main/java/com/google/devtools/build/lib/analysis:no_build_request_finished_event",
+        "//src/main/java/com/google/devtools/build/lib/analysis:provider_collection",
         "//src/main/java/com/google/devtools/build/lib/analysis:server_directories",
         "//src/main/java/com/google/devtools/build/lib/analysis:template_expansion_exception",
+        "//src/main/java/com/google/devtools/build/lib/analysis:test/coverage_artifacts_known_event",
         "//src/main/java/com/google/devtools/build/lib/analysis:test/coverage_report_action_factory",
         "//src/main/java/com/google/devtools/build/lib/analysis:top_level_artifact_context",
         "//src/main/java/com/google/devtools/build/lib/analysis:transitive_info_collection",
@@ -333,7 +374,8 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/exec/local:options",
         "//src/main/java/com/google/devtools/build/lib/jni",
         "//src/main/java/com/google/devtools/build/lib/metrics:event",
-        "//src/main/java/com/google/devtools/build/lib/metrics:garage-collection-metrics-util",
+        "//src/main/java/com/google/devtools/build/lib/metrics:garbage-collection-metrics-util",
+        "//src/main/java/com/google/devtools/build/lib/metrics/criticalpath",
         "//src/main/java/com/google/devtools/build/lib/packages",
         "//src/main/java/com/google/devtools/build/lib/packages/semantics",
         "//src/main/java/com/google/devtools/build/lib/pkgcache",
@@ -342,10 +384,13 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/profiler/memory:allocationtracker",
         "//src/main/java/com/google/devtools/build/lib/query2",
         "//src/main/java/com/google/devtools/build/lib/query2:aquery-utils",
+        "//src/main/java/com/google/devtools/build/lib/query2/common:cquery-node",
+        "//src/main/java/com/google/devtools/build/lib/query2/common:options",
         "//src/main/java/com/google/devtools/build/lib/query2/engine",
         "//src/main/java/com/google/devtools/build/lib/query2/query/output",
         "//src/main/java/com/google/devtools/build/lib/runtime/events",
         "//src/main/java/com/google/devtools/build/lib/server",
+        "//src/main/java/com/google/devtools/build/lib/server:idle_task",
         "//src/main/java/com/google/devtools/build/lib/server:pid_file_watcher",
         "//src/main/java/com/google/devtools/build/lib/server:rpc_server",
         "//src/main/java/com/google/devtools/build/lib/server:shutdown_hooks",
@@ -354,7 +399,6 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/skyframe:action_execution_inactivity_watchdog",
         "//src/main/java/com/google/devtools/build/lib/skyframe:aspect_completion_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:aspect_key_creator",
-        "//src/main/java/com/google/devtools/build/lib/skyframe:build_configuration",
         "//src/main/java/com/google/devtools/build/lib/skyframe:build_driver_key",
         "//src/main/java/com/google/devtools/build/lib/skyframe:build_driver_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:build_result_listener",
@@ -362,14 +406,17 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/skyframe:configuration_phase_started_event",
         "//src/main/java/com/google/devtools/build/lib/skyframe:configured_target_key",
         "//src/main/java/com/google/devtools/build/lib/skyframe:configured_target_progress_receiver",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:coverage_report_value",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:default_syscall_cache",
         "//src/main/java/com/google/devtools/build/lib/skyframe:diff_awareness",
         "//src/main/java/com/google/devtools/build/lib/skyframe:execution_finished_event",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:incremental_package_roots",
         "//src/main/java/com/google/devtools/build/lib/skyframe:loading_phase_started_event",
         "//src/main/java/com/google/devtools/build/lib/skyframe:package_progress_receiver",
         "//src/main/java/com/google/devtools/build/lib/skyframe:package_roots_no_symlink_creation",
         "//src/main/java/com/google/devtools/build/lib/skyframe:package_value",
-        "//src/main/java/com/google/devtools/build/lib/skyframe:per_build_syscall_cache",
         "//src/main/java/com/google/devtools/build/lib/skyframe:precomputed_value",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:repository_mapping_value",
         "//src/main/java/com/google/devtools/build/lib/skyframe:sky_functions",
         "//src/main/java/com/google/devtools/build/lib/skyframe:skyframe_cluster",
         "//src/main/java/com/google/devtools/build/lib/skyframe:skyframe_error_processor",
@@ -380,8 +427,8 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/skyframe:top_level_status_events",
         "//src/main/java/com/google/devtools/build/lib/skyframe:workspace_info",
         "//src/main/java/com/google/devtools/build/lib/skyframe/actiongraph/v2:actiongraph_v2",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/config",
         "//src/main/java/com/google/devtools/build/lib/skyframe/rewinding:action_rewound_event",
-        "//src/main/java/com/google/devtools/build/lib/unix",
         "//src/main/java/com/google/devtools/build/lib/util",
         "//src/main/java/com/google/devtools/build/lib/util:TestType",
         "//src/main/java/com/google/devtools/build/lib/util:abrupt_exit_exception",
@@ -401,7 +448,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/vfs",
         "//src/main/java/com/google/devtools/build/lib/vfs:output_service",
         "//src/main/java/com/google/devtools/build/lib/vfs:pathfragment",
-        "//src/main/java/com/google/devtools/build/lib/windows",
+        "//src/main/java/com/google/devtools/build/lib/vfs/bazel",
         "//src/main/java/com/google/devtools/build/lib/worker:worker_metric",
         "//src/main/java/com/google/devtools/build/skyframe",
         "//src/main/java/com/google/devtools/build/skyframe:skyframe-objects",
@@ -414,8 +461,10 @@ java_library(
         "//src/main/protobuf:any_java_proto",
         "//src/main/protobuf:command_line_java_proto",
         "//src/main/protobuf:command_server_java_proto",
+        "//src/main/protobuf:execution_graph_java_proto",
         "//src/main/protobuf:failure_details_java_proto",
         "//src/main/protobuf:invocation_policy_java_proto",
+        "//src/main/protobuf:memory_pressure_java_proto",
         "//src/main/protobuf:option_filters_java_proto",
         "//src/main/protobuf:test_status_java_proto",
         "//third_party:auto_value",
@@ -426,6 +475,7 @@ java_library(
         "//third_party:jsr305",
         "@com_google_protobuf//:protobuf_java",
         "@com_google_protobuf//java/util",
+        "@zstd-jni//:zstd-jni",
     ],
 )
 
@@ -464,10 +514,10 @@ filegroup(
     name = "docs_embedded_in_sources",
     srcs = glob(["**/*.java"]) + [
         "//src/main/java/com/google/devtools/build/lib/analysis:srcs",
+        "//src/main/java/com/google/devtools/build/lib/bazel/rules:srcs",
         "//src/main/java/com/google/devtools/build/lib/exec:srcs",
         "//src/main/java/com/google/devtools/build/lib/repository:srcs",
         "//src/main/java/com/google/devtools/build/lib/rules:srcs",
-        "//src/main/java/com/google/devtools/build/lib/bazel/rules:srcs",
     ],
 )
 
@@ -483,6 +533,7 @@ genrule(
         "$(location //src/main/java/com/google/devtools/build/docgen:docgen_bin)" +
         " --link_map_path=$(location //src/main/java/com/google/devtools/build/docgen:bazel_link_map)" +
         " --provider=com.google.devtools.build.lib.bazel.rules.BazelRuleClassProvider" +
+        " --input_root=$$PWD" +
         " --input_dir=$$PWD/src/main/java/com/google/devtools/build/lib" +
         " --output_dir=$(@D)/be" +
         " --create_toc=true &&" +
@@ -504,7 +555,7 @@ genrule(
     outs = ["command-line-reference.html"],
     cmd = (
         "cat $(location //site:command-line-reference-prefix.html) > $@ && " +
-        "TMP=`mktemp -d /tmp/tmp.XXXXXXXXXX` && " +
+        "TMP=$$(mktemp -d $${TMPDIR:-/tmp}/tmp.XXXXXXXXXX) && " +
         # TODO(#11179): Remove when the stub template fix is released.
         "export JARBIN=$(JAVABASE)/bin/jar && " +
         "$(location //src/main/java/com/google/devtools/build/lib/bazel:BazelServer) " +
@@ -530,7 +581,10 @@ genrule(
           " $(@D)/skylark-lib" +
           " --link_map_path=$(location //src/main/java/com/google/devtools/build/docgen:bazel_link_map)" +
           " --create_toc=true" +
-          " && zip -qj $@ $(@D)/skylark-lib/*",
+          " && OUTPUT=$$PWD/$@" +
+          " && pushd $(@D)/skylark-lib" +
+          " && zip -qr $$OUTPUT ." +
+          " && popd",
     tools = ["//src/main/java/com/google/devtools/build/docgen:skydoc_bin"],
     visibility = ["//site:__pkg__"],
 )
@@ -569,6 +623,7 @@ genrule(
         " --output_file=$@" +
         " --link_map_path=$(location //src/main/java/com/google/devtools/build/docgen:bazel_link_map) " +
         " --provider=com.google.devtools.build.lib.bazel.rules.BazelRuleClassProvider" +
+        " --input_root=$$PWD" +
         " --input_dir=$$PWD/src/main/java/com/google/devtools/build/lib"
     ),
     tools = [

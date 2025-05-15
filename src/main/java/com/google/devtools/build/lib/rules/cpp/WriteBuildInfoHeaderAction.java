@@ -73,7 +73,7 @@ public final class WriteBuildInfoHeaderAction extends AbstractFileWriteAction {
       Artifact primaryOutput,
       boolean writeVolatileInfo,
       boolean writeStableInfo) {
-    super(ActionOwner.SYSTEM_ACTION_OWNER, inputs, primaryOutput, /*makeExecutable=*/ false);
+    super(ActionOwner.SYSTEM_ACTION_OWNER, inputs, primaryOutput);
     if (!inputs.isEmpty()) {
       // With non-empty inputs we should not generate both volatile and non-volatile data
       // in the same header file.
@@ -164,7 +164,7 @@ public final class WriteBuildInfoHeaderAction extends AbstractFileWriteAction {
   }
 
   private boolean isUnconditional() {
-    // Because of special handling in the MetadataHandler, changed volatile build
+    // Because of special handling in the action cache, changed volatile build
     // information does not trigger relinking of all libraries that have
     // linkstamps. But we do want to regenerate the header in case libraries are
     // relinked because of other reasons.

@@ -37,6 +37,7 @@ EOF
   touch $r/fg/file
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name="r", path="$r")
 bind(name="e", actual="@r//:fg")
 EOF
@@ -83,6 +84,7 @@ EOF
   cd ${WORKSPACE_DIR}
   mkdir -p {zoo,red}
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name = 'pandas', path = '${repo2}')
 EOF
 
@@ -142,6 +144,7 @@ EOF
 
   cd ${WORKSPACE_DIR}
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name = 'endangered', path = '$repo2')
 EOF
 
@@ -185,15 +188,11 @@ EOF
 
   bazel build //zoo:ball-pit >& $TEST_log && \
     fail "Expected build to fail"
-  expect_log "no such package '@common//carnivore'"
+  expect_log "No repository visible as '@common' from main repository"
 }
 
 function test_new_local_repository_with_build_file() {
   do_new_local_repository_test "build_file"
-}
-
-function test_new_local_repository_with_labeled_build_file() {
-  do_new_local_repository_test "build_file+label"
 }
 
 function test_new_local_repository_with_build_file_content() {
@@ -224,22 +223,18 @@ public class Mongoose {
 }
 EOF
 
-  if [ "$1" == "build_file" -o "$1" == "build_file+label" ] ; then
-    build_file=BUILD.carnivore
-    build_file_str="${build_file}"
-    if [ "$1" == "build_file+label" ]; then
-      build_file_str="//:${build_file}"
-      cat > BUILD
-    fi
+  if [ "$1" == "build_file" ] ; then
+    touch BUILD
     cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name = 'endangered',
     path = '$project_dir',
-    build_file = '$build_file',
+    build_file = '//:BUILD.carnivore',
 )
 EOF
 
-    cat > $build_file <<EOF
+    cat > BUILD.carnivore <<EOF
 java_library(
     name = "mongoose",
     srcs = ["carnivore/Mongoose.java"],
@@ -248,6 +243,7 @@ java_library(
 EOF
   else
     cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name = 'endangered',
     path = '$project_dir',
@@ -301,11 +297,6 @@ EOF
   expect_log "Growl!"
 }
 
-function test_default_ws() {
-  bazel fetch //external:main || fail "Fetch failed"
-  bazel build //external:main >& $TEST_log || fail "Failed to build java"
-}
-
 function test_external_hdrs() {
   local external_ws=$TEST_TMPDIR/path/to/my/lib
   mkdir -p $external_ws
@@ -347,6 +338,7 @@ cc_binary(
 )
 EOF
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "greet_ws",
     path = "$external_ws",
@@ -382,6 +374,7 @@ cc_library(
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "clib_repo",
     path = "$clib",
@@ -417,19 +410,23 @@ function test_external_query() {
   mkdir -p $external_dir
   create_workspace_with_default_repos $external_dir/WORKSPACE
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "my_repo",
     path = "$external_dir",
 )
 EOF
-  bazel fetch //external:my_repo || fail "Fetch failed"
+  bazel fetch --repo=@@my_repo || fail "Fetch failed"
   bazel query 'deps(//external:my_repo)' >& $TEST_log || fail "query failed"
   expect_log "//external:my_repo"
 }
 
 function test_repository_package_query() {
   mkdir a b b/b
-  echo "local_repository(name='b', path='b')" > WORKSPACE
+  cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
+local_repository(name='b', path='b')
+EOF
   echo "sh_library(name='a', deps=['@b//b'])" > a/BUILD
   create_workspace_with_default_repos b/WORKSPACE
   echo "sh_library(name='b')" > b/b/BUILD
@@ -440,7 +437,10 @@ function test_repository_package_query() {
 
 function test_repository_buildfiles_package_query() {
   mkdir a b b/b b/c
-  echo "local_repository(name='b', path='b')" > WORKSPACE
+  cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
+local_repository(name='b', path='b')
+EOF
   echo "sh_library(name='a', deps=['@b//b'])" > a/BUILD
   touch b/WORKSPACE b/c/BUILD
   cat > b/b/BUILD <<EOF
@@ -460,14 +460,16 @@ function test_override_workspace_file() {
   local bar=$TEST_TMPDIR/bar
   mkdir -p "$bar"
   cat > "$bar/WORKSPACE" <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 workspace(name = "foo")
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name = "bar",
     path = "$bar",
-    build_file = "BUILD",
+    build_file = "//:BUILD",
 )
 EOF
   touch BUILD
@@ -478,6 +480,7 @@ EOF
 
 function test_missing_path_reported_as_user_defined_it() {
   cat >WORKSPACE <<eof
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository", "new_local_repository")
 local_repository(name = "foo1", path = "./missing")
 
 new_local_repository(name = "foo2", path = "./missing", build_file_content = "")
@@ -519,6 +522,7 @@ eof
 
 function test_path_looking_like_home_directory_is_reported_as_user_defined_it() {
   cat >WORKSPACE <<eof
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository", "new_local_repository")
 local_repository(name = "foo1", path = "~/missing")
 
 new_local_repository(name = "foo2", path = "~/missing", build_file_content = "")
@@ -569,10 +573,11 @@ function test_overlaid_build_file() {
   mkdir $mutant
   create_workspace_with_default_repos $mutant/WORKSPACE
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name = "mutant",
     path = "$mutant",
-    build_file = "mutant.BUILD"
+    build_file = "//:mutant.BUILD"
 )
 
 bind(
@@ -580,6 +585,7 @@ bind(
     actual = "@mutant//:turtle",
 )
 EOF
+  touch BUILD
   cat > mutant.BUILD <<EOF
 genrule(
     name = "turtle",
@@ -610,6 +616,7 @@ function test_external_deps_in_remote_repo() {
   mkdir -p $r
   create_workspace_with_default_repos $r/WORKSPACE
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 local_repository(
     name = "r",
     path = "$r",
@@ -670,6 +677,7 @@ genrule(
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "r",
     path = "$r",
@@ -697,6 +705,7 @@ EOF
   touch $r/b/{BUILD,b}
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "r",
     path = "$r",
@@ -723,6 +732,7 @@ int main() { return 0; };
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "r",
     path = "$r",
@@ -747,6 +757,7 @@ genrule(
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name="r", path="$r")
 EOF
 
@@ -768,6 +779,7 @@ EOF
 exports_files(["a/b"])
 EOF
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "other",
     path = "$other_ws",
@@ -793,7 +805,7 @@ sample_bin = rule(
         '_dep': attr.label(
             default=Label("@other//:a/b"),
             executable=True,
-            cfg="host",
+            cfg="exec",
             allow_single_file=True)
     },
     outputs = {'sh': "%{name}.sh"},
@@ -828,6 +840,7 @@ genrule(
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "r",
     path = "$r",
@@ -885,6 +898,7 @@ EOF
   touch $r/rfgf
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name="r", path="$r")
 EOF
 
@@ -925,6 +939,7 @@ def User():
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name="r", path="$r")
 EOF
 
@@ -947,6 +962,7 @@ exports_files(["g", "h"])
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name="r", path="$r")
 EOF
 
@@ -995,6 +1011,7 @@ genrule(
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name='r', path='$r')
 EOF
 
@@ -1020,6 +1037,7 @@ int main() { return 0; };
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "r/a",
     path = "$r/a",
@@ -1055,6 +1073,7 @@ int getNum();
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "r",
     path = "$remote",
@@ -1090,13 +1109,15 @@ int b() { return 42; }
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name="r",
     path="$r",
-    build_file="BUILD.r"
+    build_file="//:BUILD.r"
 )
 EOF
 
+  touch BUILD
   cat > BUILD.r <<EOF
 cc_library(name = "a", srcs = ["a.cc"])
 EOF
@@ -1126,6 +1147,7 @@ genrule(
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name="r",
     path="$r",
@@ -1147,6 +1169,7 @@ EOF
 function test_local_repository_path_does_not_exist() {
   rm -rf $TEST_TMPDIR/r
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1170,6 +1193,7 @@ genrule(
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1177,17 +1201,12 @@ local_repository(
 EOF
 
   bazel build @r//... &> $TEST_log && fail "Build succeeded unexpectedly"
-  expect_log "No WORKSPACE file found"
+  expect_log "No MODULE.bazel, REPO.bazel, or WORKSPACE file found"
 
   # Create the workspace and verify it now succeeds.
   create_workspace_with_default_repos $r/WORKSPACE
   bazel build @r//... &> $TEST_log || fail "Build failed unexpectedly"
-  expect_not_log "No WORKSPACE file found"
-
-  # Remove again and verify it fails again.
-  rm -f $r/WORKSPACE
-  bazel build @r//... &> $TEST_log && fail "Build succeeded unexpectedly"
-  expect_log "No WORKSPACE file found"
+  expect_not_log "No MODULE.bazel, REPO.bazel, or WORKSPACE file found"
 }
 
 # Regression test for #1697.
@@ -1205,6 +1224,7 @@ genrule(
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1225,6 +1245,7 @@ function test_new_local_repository_path_not_existing() {
   local r=$TEST_TMPDIR/r
   rm -rf $r
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1246,6 +1267,7 @@ function test_new_local_repository_path_not_directory() {
   rm -rf $r
   touch $r
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1271,6 +1293,7 @@ function test_new_local_repository_path_symlink_to_dir() {
   ln -s $s $r
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1295,6 +1318,7 @@ function test_new_local_repository_path_symlink_to_file() {
   ln -s $s $r
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1376,6 +1400,7 @@ java_library(
 EOF
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "x_repo",
     path = "$external_dir",
@@ -1384,10 +1409,10 @@ EOF
 
   bazel build @x_repo//a >& $TEST_log && fail "Building @x_repo//a should error out"
   expect_log "** Please add the following dependencies:"
-  expect_log "@x_repo//x to @x_repo//a"
+  expect_log " @x_repo//x to @x_repo//a"
 }
 
-# This test verifies that the //... pattern includes external dependencies
+# This test verifies that the `public` pattern includes external dependencies.
 #
 # ${WORKSPACE_DIR}/
 #     WORKSPACE
@@ -1397,22 +1422,26 @@ EOF
 #   blue/
 #     BUILD
 #
-# repo2 contains a .sh file whose visibility is set to //...
-# we verify that we can use this file from ${WORKSPACE_DIR} by running it as
+# repo2 contains a .sh file whose visibility is set to public.
+# We verify that we can use this file from ${WORKSPACE_DIR} by running it as
 # part of the "run-the-thing" binary.
-function test_slashslashdotdotdot_includes_external_dependencies() {
+#
+# TODO(brandjon): Can this test be deleted in favor of an analysis-time unit
+# test? Ideally PackageGroupTest should cover it, but that suite can't handle
+# external repos.
+function test_public_includes_external_dependencies() {
   create_new_workspace
   repo2=${new_workspace_dir}
   mkdir -p blue
   cat > blue/BUILD <<EOF
 package_group(
-    name = "slash-slash-dot-dot-dot",
-    packages = ["//..."],
+    name = "everyone",
+    packages = ["public"],
 )
 filegroup(
     name = "do-the-thing",
     srcs = ["do-the-thing.sh"],
-    visibility = [":slash-slash-dot-dot-dot"]
+    visibility = [":everyone"]
 )
 EOF
   cat > blue/do-the-thing.sh <<EOF
@@ -1424,6 +1453,7 @@ EOF
   cd ${WORKSPACE_DIR}
   mkdir -p green
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name = 'blue', path = "${repo2}")
 EOF
   cat > green/BUILD <<EOF
@@ -1437,9 +1467,11 @@ EOF
   expect_log "WE DID IT FAM"
 }
 
-## Like test above, but testing an external dep can depend on a local target
-## with //... visibility
-function test_slashslashdotdotdot_includes_main_repo_from_external_dep() {
+# Like test above, but testing an external dep can depend on a local target with
+# with `public` visibility.
+#
+# TODO(brandjon): Eliminate this test, as described above?
+function test_public_includes_main_repo_from_external_dep() {
   create_new_workspace
   repo2=${new_workspace_dir}
   mkdir -p blue
@@ -1453,17 +1485,18 @@ EOF
   cd ${WORKSPACE_DIR}
   mkdir -p green
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name = 'blue', path = "${repo2}")
 EOF
   cat > green/BUILD <<EOF
 package_group(
-    name = "slash-slash-dot-dot-dot",
-    packages = ["//..."],
+    name = "everyone",
+    packages = ["public"],
 )
 filegroup(
     name = "do-the-thing",
     srcs = ["do-the-thing.sh"],
-    visibility = [":slash-slash-dot-dot-dot"]
+    visibility = [":everyone"]
 )
 
 EOF

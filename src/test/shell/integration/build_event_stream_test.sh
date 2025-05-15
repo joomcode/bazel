@@ -579,7 +579,7 @@ function test_test_runtime() {
 function test_test_start_times() {
   # Verify that the start time of a test is reported, regardless whether
   # it was cached or not.
-  bazel clean --expunge
+  bazel clean
   bazel test --build_event_text_file=$TEST_log pkg:true \
     || fail "bazel test failed"
   expect_log 'test_attempt_start_millis_epoch.*[1-9]'
@@ -617,7 +617,7 @@ function test_test_attempts_multi_runs_flake_detection() {
 function test_cached_test_results() {
   # Verify that both, clean and cached test results are reported correctly,
   # including the appropriate reference to log files.
-  bazel clean --expunge
+  bazel clean
   bazel test --build_event_text_file=$TEST_log pkg:true \
     || fail "Clean testing pkg:true failed"
   expect_log '^test_result'
@@ -1021,9 +1021,9 @@ function test_visibility_indirect() {
   expect_log 'reason: ANALYSIS_FAILURE'
   expect_log '^aborted'
   expect_log '//visibility:cannotsee'
-  # There should be precisely one events with target_completed as event id type
+  # There should be precisely one event with target_configured as event id type
   (echo 'g/^id/+1p'; echo 'q') | ed "${TEST_log}" 2>&1 | tail -n +2 > event_id_types
-  [ `grep target_completed event_id_types | wc -l` -eq 1 ] \
+  [ `grep target_configured event_id_types | wc -l` -eq 1 ] \
       || fail "not precisely one target_completed event id"
 }
 
@@ -1077,7 +1077,7 @@ function test_stdout_stderr_reported() {
   # Verify that bazel's stdout/stderr is included in the build event stream.
 
   # Make sure we generate enough output on stderr
-  bazel clean --expunge
+  bazel clean
   bazel test --build_event_text_file=$TEST_log --curses=no \
         pkg:slow 2>stderr.log || fail "slowtest failed"
   # Take a line that is likely not the output of an action (possibly reported
@@ -1092,7 +1092,7 @@ function test_stdout_stderr_reported() {
 function test_unbuffered_stdout_stderr() {
    # Verify that the option --bes_outerr_buffer_size ensures that messages are
    # flushed out to the BEP immediately
-  bazel clean --expunge
+  bazel clean
   bazel build --build_event_text_file="${TEST_log}" \
         --bes_outerr_buffer_size=1 chain:entry10
   progress_count=$(grep '^progress' "${TEST_log}" | wc -l )
@@ -1216,7 +1216,7 @@ filegroup(
   srcs = ["doesnotexist"],
 )
 EOF
-  (bazel build --build_event_text_file="${TEST_log}" :badfilegroup \
+  (bazel build --noenable_bzlmod --build_event_text_file="${TEST_log}" :badfilegroup \
     && fail "Expected failure") || :
   # There should be precisely one event with target_completed as event id type
   (echo 'g/^id/+1p'; echo 'q') | ed "${TEST_log}" 2>&1 | tail -n +2 > event_id_types
@@ -1226,7 +1226,7 @@ EOF
   [ `grep unconfigured_label event_id_types | wc -l` -eq 1 ] \
       || fail "not precisely one unconfigured_label event id"
 
-  (bazel build --build_event_text_file="${TEST_log}" :badfilegroup :doesnotexist \
+  (bazel build --noenable_bzlmod --build_event_text_file="${TEST_log}" :badfilegroup :doesnotexist \
     && fail "Expected failure") || :
   # There should be precisely two events with target_completed as event id type
   (echo 'g/^id/+1p'; echo 'q') | ed "${TEST_log}" 2>&1 | tail -n +2 > event_id_types
@@ -1423,7 +1423,7 @@ EOF
   # toolchain resolution and also the //external package. This way we don't need
   # to bother making careful assertions about these packages in our actual test
   # logic below.
-  bazel build --nobuild \
+  bazel build --noenable_bzlmod --nobuild \
     //just-to-get-packages-needed-for-toolchain-resolution:whatever \
     >& "$TEST_log" || fail "Expected success"
 
@@ -1465,6 +1465,7 @@ fail('bad')
 EOF
 
   bazel build \
+    --noenable_bzlmod \
     --nobuild \
     --keep_going \
     --build_event_text_file=bep.txt \

@@ -71,6 +71,7 @@ function test_glob_in_synthesized_build_file() {
   mkdir $pkg/B || fail "mkdir $pkg/B"
 
   cat >$pkg/A/WORKSPACE <<'eof'
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name = "B",
     build_file_content = """
@@ -83,6 +84,7 @@ filegroup(
     path = "../B",
 )
 eof
+  write_default_lockfile "$pkg/A/MODULE.bazel.lock"
 
   cat >$pkg/A/BUILD <<'eof'
 genrule(
@@ -123,15 +125,18 @@ function test_recursive_glob_in_new_local_repository() {
   touch "$pkg/B/subdir/outer.txt"
   touch "$pkg/B/subdir/inner/inner.txt"
   cat >"$pkg/A/WORKSPACE" <<eof
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 new_local_repository(
     name = "myext",
     path = "../B",
-    build_file = "BUILD.myext",
+    build_file = "//:BUILD.myext",
 )
 eof
+  touch "$pkg/A/BUILD.bazel"
   cat >"$pkg/A/BUILD.myext" <<eof
 filegroup(name = "all_files", srcs = glob(["**"]))
 eof
+  write_default_lockfile "$pkg/A/MODULE.bazel.lock"
 
   # Shut down the server afterwards so the test cleanup can remove $pkg/A.
   ( cd "$pkg/A"

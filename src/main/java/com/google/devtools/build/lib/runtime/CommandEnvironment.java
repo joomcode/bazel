@@ -20,14 +20,23 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.eventbus.EventBus;
-import com.google.devtools.build.lib.actions.MetadataProvider;
+import com.google.common.eventbus.Subscribe;
+import com.google.devtools.build.lib.actions.ActionOutputDirectoryHelper;
+import com.google.devtools.build.lib.actions.InputMetadataProvider;
 import com.google.devtools.build.lib.actions.ResourceManager;
 import com.google.devtools.build.lib.analysis.AnalysisOptions;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
+import com.google.devtools.build.lib.analysis.BuildInfoEvent;
 import com.google.devtools.build.lib.analysis.config.CoreOptions;
+import com.google.devtools.build.lib.bazel.repository.downloader.DelegatingDownloader;
+import com.google.devtools.build.lib.bazel.repository.downloader.HttpDownloader;
+import com.google.devtools.build.lib.buildtool.BuildRequestOptions;
 import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.concurrent.QuiescingExecutors;
+import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.exec.SingleBuildFileCache;
 import com.google.devtools.build.lib.pkgcache.PackageManager;
@@ -38,7 +47,10 @@ import com.google.devtools.build.lib.profiler.ProfilerTask;
 import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.runtime.proto.InvocationPolicyOuterClass.InvocationPolicy;
 import com.google.devtools.build.lib.server.FailureDetails;
+import com.google.devtools.build.lib.server.FailureDetails.ExternalRepository;
+import com.google.devtools.build.lib.server.FailureDetails.ExternalRepository.Code;
 import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.server.IdleTask;
 import com.google.devtools.build.lib.skyframe.BuildResultListener;
 import com.google.devtools.build.lib.skyframe.SkyframeBuildView;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
@@ -83,8 +95,8 @@ public class CommandEnvironment {
   private final BlazeWorkspace workspace;
   private final BlazeDirectories directories;
 
-  private final UUID commandId;  // Unique identifier for the command being run
-  private final String buildRequestId;  // Unique identifier for the build being run
+  private final UUID commandId; // Unique identifier for the command being run
+  private final String buildRequestId; // Unique identifier for the build being run
   private final Reporter reporter;
   private final EventBus eventBus;
   private final BlazeModule.ModuleEnvironment blazeModuleEnvironment;
@@ -101,6 +113,7 @@ public class CommandEnvironment {
   private final Path workingDirectory;
   private final PathFragment relativeWorkingDirectory;
   private final SyscallCache syscallCache;
+  private final QuiescingExecutors quiescingExecutors;
   private final Duration waitTime;
   private final long commandStartTime;
   private final ImmutableList<Any> commandExtensions;
@@ -108,10 +121,16 @@ public class CommandEnvironment {
   private final Consumer<String> shutdownReasonConsumer;
   private final BuildResultListener buildResultListener;
   private final CommandLinePathFactory commandLinePathFactory;
+  private final HttpDownloader httpDownloader;
+  private final DelegatingDownloader delegatingDownloader;
+  private final ImmutableList.Builder<IdleTask> idleTasks = ImmutableList.builder();
+
+  private boolean mergedAnalysisAndExecution;
 
   private OutputService outputService;
   private String workspaceName;
   private boolean hasSyncedPackageLoading = false;
+  private boolean buildInfoPosted = false;
   @Nullable private WorkspaceInfoFromDiff workspaceInfoFromDiff;
 
   // This AtomicReference is set to:
@@ -125,7 +144,12 @@ public class CommandEnvironment {
   private final Object fileCacheLock = new Object();
 
   @GuardedBy("fileCacheLock")
-  private MetadataProvider fileCache;
+  private InputMetadataProvider fileCache;
+
+  private final Object outputDirectoryHelperLock = new Object();
+
+  @GuardedBy("outputDirectoryHelperLock")
+  private ActionOutputDirectoryHelper outputDirectoryHelper;
 
   private class BlazeModuleEnvironment implements BlazeModule.ModuleEnvironment {
     @Nullable
@@ -166,6 +190,7 @@ public class CommandEnvironment {
       Command command,
       OptionsParsingResult options,
       SyscallCache syscallCache,
+      QuiescingExecutors quiescingExecutors,
       List<String> warnings,
       long waitTimeInMs,
       long commandStartTime,
@@ -181,6 +206,7 @@ public class CommandEnvironment {
     this.options = options;
     this.shutdownReasonConsumer = shutdownReasonConsumer;
     this.syscallCache = syscallCache;
+    this.quiescingExecutors = quiescingExecutors;
     this.blazeModuleEnvironment = new BlazeModuleEnvironment();
     this.timestampGranularityMonitor = new TimestampGranularityMonitor(runtime.getClock());
     // Record the command's starting time again, for use by
@@ -227,6 +253,32 @@ public class CommandEnvironment {
       this.packageLocator = null;
     }
     workspace.getSkyframeExecutor().setEventBus(eventBus);
+    eventBus.register(this);
+    float httpTimeoutScaling = (float) commandOptions.httpTimeoutScaling;
+    if (commandOptions.httpTimeoutScaling <= 0) {
+      reporter.handle(
+          Event.warn("Ignoring request to scale http timeouts by a non-positive factor"));
+      httpTimeoutScaling = 1.0f;
+    }
+    if (commandOptions.httpMaxParallelDownloads <= 0) {
+      this.blazeModuleEnvironment.exit(
+          new AbruptExitException(
+              DetailedExitCode.of(
+                  FailureDetail.newBuilder()
+                      .setMessage(
+                          "The maximum number of parallel downloads needs to be a positive number")
+                      .setExternalRepository(
+                          ExternalRepository.newBuilder().setCode(Code.BAD_DOWNLOADER_CONFIG))
+                      .build())));
+    }
+
+    this.httpDownloader =
+        new HttpDownloader(
+            commandOptions.httpConnectorAttempts,
+            commandOptions.httpConnectorRetryMaxTimeout,
+            commandOptions.httpMaxParallelDownloads,
+            httpTimeoutScaling);
+    this.delegatingDownloader = new DelegatingDownloader(httpDownloader);
 
     ClientOptions clientOptions =
         Preconditions.checkNotNull(
@@ -373,9 +425,7 @@ public class CommandEnvironment {
     return packageLocator;
   }
 
-  /**
-   * Returns the reporter for events.
-   */
+  /** Returns the reporter for events. */
   public Reporter getReporter() {
     return reporter;
   }
@@ -399,6 +449,7 @@ public class CommandEnvironment {
   public Command getCommand() {
     return command;
   }
+
   public String getCommandName() {
     return command.name();
   }
@@ -421,6 +472,21 @@ public class CommandEnvironment {
    */
   public Map<String, String> getAllowlistedTestEnv() {
     return filterClientEnv(visibleTestEnv);
+  }
+
+  /**
+   * This should be the source of truth for whether this build should be run with merged analysis
+   * and execution phases.
+   */
+  public boolean withMergedAnalysisAndExecutionSourceOfTruth() {
+    return mergedAnalysisAndExecution;
+  }
+
+  public void setMergedAnalysisAndExecution(boolean value) {
+    mergedAnalysisAndExecution = value;
+    getSkyframeExecutor()
+        .setMergedSkyframeAnalysisExecutionSupplier(
+            this::withMergedAnalysisAndExecutionSourceOfTruth);
   }
 
   private Map<String, String> filterClientEnv(Set<String> vars) {
@@ -522,9 +588,11 @@ public class CommandEnvironment {
   /**
    * Returns the working directory of the server.
    *
-   * <p>This is often the first entry on the {@code --package_path}, but not always.
-   * Callers should certainly not make this assumption. The Path returned may be null.
+   * <p>This is often the first entry on the {@code --package_path}, but not always. Callers should
+   * certainly not make this assumption. The Path returned may be null; for example, when the
+   * command is invoked outside a workspace.
    */
+  @Nullable
   public Path getWorkspace() {
     return getDirectories().getWorkingDirectory();
   }
@@ -547,9 +615,8 @@ public class CommandEnvironment {
   }
 
   /**
-   * Returns the output base directory associated with this Blaze server
-   * process. This is the base directory for shared Blaze state as well as tool
-   * and strategy specific subdirectories.
+   * Returns the output base directory associated with this Blaze server process. This is the base
+   * directory for shared Blaze state as well as tool and strategy specific subdirectories.
    */
   public Path getOutputBase() {
     return getDirectories().getOutputBase();
@@ -571,10 +638,6 @@ public class CommandEnvironment {
    */
   public Path getActionTempsDirectory() {
     return getDirectories().getActionTempsDirectory(getExecRoot());
-  }
-
-  public Path getPersistentActionOutsDirectory() {
-    return getDirectories().getPersistentActionOutsDirectory(getExecRoot());
   }
 
   /**
@@ -673,8 +736,8 @@ public class CommandEnvironment {
    * Throws the exception currently queued by a Blaze module.
    *
    * <p>This should be called as often as is practical so that errors are reported as soon as
-   * possible. Ideally, we'd not need this, but the event bus swallows exceptions so we raise
-   * the exception this way.
+   * possible. Ideally, we'd not need this, but the event bus swallows exceptions so we raise the
+   * exception this way.
    */
   public void throwPendingException() throws AbruptExitException {
     AbruptExitException exception = getPendingException();
@@ -710,6 +773,7 @@ public class CommandEnvironment {
                 clientEnv,
                 repoEnvFromOptions,
                 timestampGranularityMonitor,
+                quiescingExecutors,
                 options);
   }
 
@@ -762,7 +826,9 @@ public class CommandEnvironment {
     AnalysisOptions viewOptions = options.getOptions(AnalysisOptions.class);
     skyframeExecutor.decideKeepIncrementalState(
         runtime.getStartupOptionsProvider().getOptions(BlazeServerStartupOptions.class).batch,
-        commonOptions.keepStateAfterBuild, commonOptions.trackIncrementalState,
+        commonOptions.keepStateAfterBuild,
+        commonOptions.trackIncrementalState,
+        commonOptions.heuristicallyDropNodes,
         viewOptions != null && viewOptions.discardAnalysisCache,
         reporter);
 
@@ -795,7 +861,7 @@ public class CommandEnvironment {
   }
 
   /** Returns the file cache to use during this build. */
-  public MetadataProvider getFileCache() {
+  public InputMetadataProvider getFileCache() {
     synchronized (fileCacheLock) {
       if (fileCache == null) {
         fileCache =
@@ -806,6 +872,17 @@ public class CommandEnvironment {
     }
   }
 
+  public ActionOutputDirectoryHelper getOutputDirectoryHelper() {
+    synchronized (outputDirectoryHelperLock) {
+      if (outputDirectoryHelper == null) {
+        var buildRequestOptions = options.getOptions(BuildRequestOptions.class);
+        outputDirectoryHelper =
+            new ActionOutputDirectoryHelper(buildRequestOptions.directoryCreationCacheSpec);
+      }
+      return outputDirectoryHelper;
+    }
+  }
+
   /** Use {@link #getXattrProvider} when possible: see documentation of {@link SyscallCache}. */
   public SyscallCache getSyscallCache() {
     return syscallCache;
@@ -813,6 +890,10 @@ public class CommandEnvironment {
 
   public XattrProvider getXattrProvider() {
     return getSyscallCache();
+  }
+
+  public QuiescingExecutors getQuiescingExecutors() {
+    return quiescingExecutors;
   }
 
   /**
@@ -847,5 +928,44 @@ public class CommandEnvironment {
 
   public CommandLinePathFactory getCommandLinePathFactory() {
     return commandLinePathFactory;
+  }
+
+  public void ensureBuildInfoPosted() {
+    if (buildInfoPosted) {
+      return;
+    }
+    ImmutableSortedMap<String, String> workspaceStatus =
+        workspace
+            .getWorkspaceStatusActionFactory()
+            .createDummyWorkspaceStatus(workspaceInfoFromDiff);
+    eventBus.post(new BuildInfoEvent(workspaceStatus));
+  }
+
+  @Subscribe
+  @SuppressWarnings("unused")
+  void gotBuildInfo(BuildInfoEvent event) {
+    buildInfoPosted = true;
+  }
+
+  public HttpDownloader getHttpDownloader() {
+    return httpDownloader;
+  }
+
+  public DelegatingDownloader getDownloaderDelegate() {
+    return delegatingDownloader;
+  }
+
+  /**
+   * Registers a task to be executed following this command, while the server is idle.
+   *
+   * <p>See {@link IdleServerTasks} for details.
+   */
+  public void addIdleTask(IdleTask idleTask) {
+    idleTasks.add(idleTask);
+  }
+
+  /** Returns the list of registered idle tasks. */
+  public ImmutableList<IdleTask> getIdleTasks() {
+    return idleTasks.build();
   }
 }

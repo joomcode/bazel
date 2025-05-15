@@ -55,9 +55,11 @@ RcFile::ParseError RcFile::ParseFile(const string& filename,
                                      string* error_text) {
   BAZEL_LOG(INFO) << "Parsing the RcFile " << filename;
   string contents;
-  if (!blaze_util::ReadFile(filename, &contents)) {
+  string error_message;
+  if (!blaze_util::ReadFile(filename, &contents, &error_message)) {
     blaze_util::StringPrintf(error_text,
-        "Unexpected error reading .blazerc file '%s'", filename.c_str());
+                             "Unexpected error reading config file '%s': %s",
+                             filename.c_str(), error_message.c_str());
     return ParseError::UNREADABLE_FILE;
   }
   const std::string canonical_filename =
@@ -103,7 +105,7 @@ RcFile::ParseError RcFile::ParseFile(const string& filename,
                                                              &words[1]))) {
         blaze_util::StringPrintf(
             error_text,
-            "Invalid import declaration in .blazerc file '%s': '%s'"
+            "Invalid import declaration in config file '%s': '%s'"
             " (are you in your source checkout/WORKSPACE?)",
             canonical_filename.c_str(), line.c_str());
         return ParseError::INVALID_FORMAT;

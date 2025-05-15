@@ -43,24 +43,30 @@ import net.starlark.java.syntax.Location;
 public class FakeOwner implements ActionExecutionMetadata {
   private final String mnemonic;
   private final String progressMessage;
-  @Nullable private final String ownerLabel;
+  private final String ownerLabel;
+  private final String ownerRuleKind;
   @Nullable private final Artifact primaryOutput;
   @Nullable private final PlatformInfo platform;
   private final ImmutableMap<String, String> execProperties;
+  private final boolean isBuiltForToolConfiguration;
 
   FakeOwner(
       String mnemonic,
       String progressMessage,
       String ownerLabel,
+      String ownerRuleKind,
       @Nullable Artifact primaryOutput,
       @Nullable PlatformInfo platform,
-      ImmutableMap<String, String> execProperties) {
+      ImmutableMap<String, String> execProperties,
+      boolean isBuiltForToolConfiguration) {
     this.mnemonic = mnemonic;
     this.progressMessage = progressMessage;
     this.ownerLabel = checkNotNull(ownerLabel);
+    this.ownerRuleKind = checkNotNull(ownerRuleKind);
     this.primaryOutput = primaryOutput;
     this.platform = platform;
     this.execProperties = execProperties;
+    this.isBuiltForToolConfiguration = isBuiltForToolConfiguration;
   }
 
   private FakeOwner(
@@ -69,9 +75,11 @@ public class FakeOwner implements ActionExecutionMetadata {
         mnemonic,
         progressMessage,
         ownerLabel,
-        /*primaryOutput=*/ null,
+        /* ownerRuleKind= */ "dummy-target-kind",
+        /* primaryOutput= */ null,
         platform,
-        ImmutableMap.of());
+        ImmutableMap.of(),
+        /* isBuiltForToolConfiguration= */ false);
   }
 
   public FakeOwner(String mnemonic, String progressMessage, String ownerLabel) {
@@ -80,19 +88,19 @@ public class FakeOwner implements ActionExecutionMetadata {
 
   @Override
   public ActionOwner getOwner() {
-    return ActionOwner.create(
-        Label.parseAbsoluteUnchecked(ownerLabel),
-        /*aspectDescriptors=*/ ImmutableList.of(),
+    return ActionOwner.createDummy(
+        Label.parseCanonicalUnchecked(ownerLabel),
         new Location("dummy-file", 0, 0),
+        ownerRuleKind,
         mnemonic,
-        "dummy-target-kind",
-        "configurationChecksum",
+        /* configurationChecksum= */ "configurationChecksum",
         new BuildConfigurationEvent(
             BuildEventStreamProtos.BuildEventId.getDefaultInstance(),
             BuildEventStreamProtos.BuildEvent.getDefaultInstance()),
-        "additionalProgressInfo",
-        /* execProperties=*/ ImmutableMap.of(),
-        null);
+        /* isToolConfiguration= */ isBuiltForToolConfiguration,
+        /* executionPlatform= */ null,
+        /* aspectDescriptors= */ ImmutableList.of(),
+        /* execProperties= */ ImmutableMap.of());
   }
 
   @Override
@@ -111,7 +119,7 @@ public class FakeOwner implements ActionExecutionMetadata {
   }
 
   @Override
-  public boolean inputsDiscovered() {
+  public boolean inputsKnown() {
     throw new UnsupportedOperationException();
   }
 
@@ -127,6 +135,11 @@ public class FakeOwner implements ActionExecutionMetadata {
 
   @Override
   public NestedSet<Artifact> getInputs() {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public NestedSet<Artifact> getSchedulingDependencies() {
     throw new UnsupportedOperationException();
   }
 

@@ -63,6 +63,12 @@ public final class BazelCcLibraryRule implements RuleDefinition {
             attr("implementation_deps", LABEL_LIST)
                 .allowedFileTypes(FileTypeSet.NO_FILE)
                 .mandatoryProviders(CcInfo.PROVIDER.id()))
+        /*<!-- #BLAZE_RULE(cc_library).ATTRIBUTE(additional_compiler_inputs) -->
+        Any additional files you might want to pass to the compiler command line, such as sanitizer
+        ignorelists, for example. Files specified here can then be used in copts with the
+        $(location) function.
+        <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+        .add(attr("additional_compiler_inputs", LABEL_LIST).allowedFileTypes(FileTypeSet.ANY_FILE))
         .advertiseStarlarkProvider(CcInfo.PROVIDER.id())
         .build();
   }
@@ -72,7 +78,7 @@ public final class BazelCcLibraryRule implements RuleDefinition {
     return RuleDefinition.Metadata.builder()
         .name("cc_library")
         .ancestors(CcLibraryBaseRule.class, BaseRuleClasses.MakeVariableExpandingRule.class)
-        .factoryClass(BazelCcLibrary.class)
+        .factoryClass(BaseRuleClasses.EmptyRuleConfiguredTargetFactory.class)
         .build();
   }
 }

@@ -85,11 +85,6 @@ ssize_t portable_lgetxattr(const char *path, const char *name, void *value,
   return result;
 }
 
-int portable_sysctlbyname(const char *name_chars, void *mibp, size_t *sizep) {
-  errno = ENOSYS;
-  return -1;
-}
-
 int portable_push_disable_sleep() {
   // Currently not supported.
   return -1;
@@ -143,6 +138,12 @@ void portable_start_cpu_speed_monitoring() {
 int portable_cpu_speed() {
   // Currently not implemented.
   return -1;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_google_devtools_build_lib_profiler_SystemNetworkStats_getNetIoCountersNative(
+    JNIEnv *env, jclass clazz, jobject counters_list) {
+  // Currently not implemented.
 }
 
 }  // namespace blaze_jni

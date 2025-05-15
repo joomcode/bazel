@@ -392,7 +392,8 @@ public class DynamicSpawnStrategyUnitTest {
         new SpawnBuilder()
             .withMnemonic("TheThing")
             .withOwnerPrimaryOutput(output1)
-            .withProgressMessage("Building the thing [for tool]")
+            .withProgressMessage("Building the thing")
+            .setBuiltForToolConfiguration(true)
             .build();
     DynamicExecutionOptions options = new DynamicExecutionOptions();
     options.excludeTools = true;
@@ -583,10 +584,10 @@ public class DynamicSpawnStrategyUnitTest {
   }
 
   private static SandboxedSpawnStrategy createMockSpawnStrategy(boolean canExec)
-      throws InterruptedException {
+      throws InterruptedException, ExecException {
     SandboxedSpawnStrategy strategy = mock(SandboxedSpawnStrategy.class);
     when(strategy.canExec(any(), any())).thenReturn(canExec);
-    when(strategy.beginExecution(any(), any())).thenThrow(UnsupportedOperationException.class);
+    when(strategy.exec(any(), any())).thenThrow(UnsupportedOperationException.class);
     return strategy;
   }
 }

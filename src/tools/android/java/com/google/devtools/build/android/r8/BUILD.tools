@@ -4,7 +4,7 @@ java_library(
     name = "r8",
     srcs = glob(["*.java", "desugar/*.java"]),
     deps = [
-        "//external:android/d8_jar_import",
+        "@android_gmaven_r8//jar",
         "//src/tools/android/java/com/google/devtools/build/android:all_android_tools",
     ],
     plugins = ["auto_value_plugin"],
@@ -46,8 +46,26 @@ java_binary(
         "-Dcom.android.tools.r8.createSingletonsForStatelessLambdas",
     ],
     main_class = "com.google.devtools.build.android.r8.Desugar",
-    visibility = ["//tools/android:__subpackages__"],
+    visibility = ["//visibility:public"],
     runtime_deps = [
         ":r8",
     ],
 )
+
+java_binary(
+    name = "core_library_desugar",
+    jvm_flags = [
+        # b/71513487
+        "-XX:+TieredCompilation",
+        "-XX:TieredStopAtLevel=1",
+        # b/172508621
+        "-Dcom.android.tools.r8.sortMethodsOnCfWriting",
+        "-Dcom.android.tools.r8.disableL8AnnotationRemoval",
+    ],
+    main_class = "com.google.devtools.build.android.r8.CoreLibraryDesugar",
+    visibility = ["//visibility:public"],
+    runtime_deps = [
+        ":r8",
+    ],
+)
+

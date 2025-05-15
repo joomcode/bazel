@@ -15,7 +15,6 @@ package com.google.devtools.build.lib.vfs;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.actions.CommandLineItem;
 import com.google.devtools.build.lib.skyframe.serialization.DeserializationContext;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodec;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationContext;
@@ -26,6 +25,7 @@ import com.google.errorprone.annotations.Immutable;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
 import java.io.IOException;
+import java.util.function.UnaryOperator;
 import javax.annotation.Nullable;
 
 /**
@@ -50,7 +50,7 @@ import javax.annotation.Nullable;
  */
 @Immutable
 public abstract class PathFragment
-    implements Comparable<PathFragment>, FileType.HasFileType, CommandLineItem {
+    implements Comparable<PathFragment>, FileType.HasFileType, PathStrippable {
   private static final OsPathPolicy OS = OsPathPolicy.getFilePathOs();
 
   @SerializationConstant
@@ -420,7 +420,7 @@ public abstract class PathFragment
   ////////////////////////////////////////////////////////////////////////
 
   /**
-   * Returns the number of segments in this path.
+   * Returns the number of segments in this path, excluding the drive string for absolute paths.
    *
    * <p>This operation is O(N) on the length of the string.
    */
@@ -500,6 +500,10 @@ public abstract class PathFragment
    * </code>. Thus the number of segments in the new PathFragment is <code>endIndex - beginIndex
    * </code>.
    *
+   * <p>If the path is absolute and <code>beginIndex</code> is zero, the returned path is absolute.
+   * Otherwise, if the path is relative or <code>beginIndex> is greater than zero, the returned path
+   * is relative.
+   *
    * <p>This operation is O(N) on the length of the string.
    *
    * @param beginIndex the beginning index, inclusive.
@@ -556,7 +560,7 @@ public abstract class PathFragment
       throw new IndexOutOfBoundsException(
           String.format("path: %s, beginIndex: %d endIndex: %d", toString(), beginIndex, endIndex));
     }
-    // If beginIndex is 0 we include the drive. Very odd semantics.
+    // If beginIndex is 0, we include the drive string.
     int driveStrLength = 0;
     if (beginIndex == 0) {
       starti = 0;
@@ -696,7 +700,8 @@ public abstract class PathFragment
   }
 
   /**
-   * Returns true if the passed path contains uplevel references ".." or single-dot references "."
+   * Returns true if the passed path does not contain uplevel references ("..") or single-dot
+   * references (".").
    *
    * <p>This is useful to check a string for normalization before constructing a PathFragment, since
    * these are always normalized and will throw uplevel references away.
@@ -797,8 +802,8 @@ public abstract class PathFragment
   }
 
   @Override
-  public String expandToCommandLine() {
-    return normalizedPath;
+  public String expand(UnaryOperator<PathFragment> stripPaths) {
+    return stripPaths.apply(this).normalizedPath;
   }
 
   private static void checkBaseName(String baseName) {

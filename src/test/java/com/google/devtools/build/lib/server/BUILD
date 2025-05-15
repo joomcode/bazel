@@ -1,6 +1,7 @@
 load("@rules_java//java:defs.bzl", "java_library", "java_test")
 
 package(
+    default_applicable_licenses = ["//:license"],
     default_testonly = 1,
     default_visibility = ["//src:__subpackages__"],
 )
@@ -20,6 +21,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib:runtime/command_dispatcher",
         "//src/main/java/com/google/devtools/build/lib/clock",
         "//src/main/java/com/google/devtools/build/lib/server",
+        "//src/main/java/com/google/devtools/build/lib/server:idle_task",
         "//src/main/java/com/google/devtools/build/lib/server:pid_file_watcher",
         "//src/main/java/com/google/devtools/build/lib/server:shutdown_hooks",
         "//src/main/java/com/google/devtools/build/lib/unix:procmeminfo_parser",
@@ -48,6 +50,7 @@ java_library(
 java_test(
     name = "ServerTests",
     size = "medium",
+    tags = ["requires-network"],  # https://github.com/bazelbuild/bazel/issues/20743
     test_class = "com.google.devtools.build.lib.AllTests",
     runtime_deps = [
         ":ServerTests_lib",

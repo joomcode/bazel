@@ -31,6 +31,7 @@ import com.google.devtools.build.lib.actions.ActionResult;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Executor;
 import com.google.devtools.build.lib.actions.FileStateValue;
+import com.google.devtools.build.lib.actions.RemoteArtifactChecker;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.actions.util.DummyExecutor;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
@@ -43,12 +44,12 @@ import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.ErrorInfo;
-import com.google.devtools.build.skyframe.EvaluationProgressReceiver;
 import com.google.devtools.build.skyframe.EvaluationProgressReceiver.EvaluationState;
-import com.google.devtools.build.skyframe.GraphInconsistencyReceiver;
+import com.google.devtools.build.skyframe.GroupedDeps;
+import com.google.devtools.build.skyframe.InvalidationProgressReceiver;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
-import com.google.devtools.build.skyframe.SkyframeIterableResult;
+import com.google.devtools.build.skyframe.SkyframeLookupResult;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -73,22 +74,16 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
   @Before
   public final void createBuilder() throws Exception {
     progressReceiver = new TrackingEvaluationProgressReceiver();
-    builder =
-        createBuilder(
-            inMemoryCache,
-            1,
-            /*keepGoing=*/ false,
-            progressReceiver,
-            GraphInconsistencyReceiver.THROWING);
+    builder = createBuilder(inMemoryCache, 1, /* keepGoing= */ false, progressReceiver);
   }
 
   @Before
-  public final void createExecutor() throws Exception {
+  public final void createExecutor() {
     executor = new DummyExecutor(fileSystem, rootDirectory);
   }
 
   private static final class TrackingEvaluationProgressReceiver
-      implements EvaluationProgressReceiver {
+      extends InvalidationProgressReceiver {
 
     public static final class InvalidatedKey {
       public final SkyKey skyKey;
@@ -156,7 +151,7 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
       return false;
     }
 
-    public EvaluatedEntry getEvalutedEntry(SkyKey forKey) {
+    public EvaluatedEntry getEvaluatedEntry(SkyKey forKey) {
       for (EvaluatedEntry e : evaluated) {
         if (e.skyKey.equals(forKey)) {
           return e;
@@ -166,7 +161,7 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
     }
 
     @Override
-    public void invalidated(SkyKey skyKey, InvalidationState state) {
+    protected void invalidated(SkyKey skyKey, InvalidationState state) {
       invalidated.add(new InvalidatedKey(skyKey, state));
     }
 
@@ -181,7 +176,8 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
         @Nullable SkyValue value,
         @Nullable ErrorInfo error,
         Supplier<EvaluationSuccessState> evaluationSuccessState,
-        EvaluationState state) {
+        EvaluationState state,
+        @Nullable GroupedDeps directDeps) {
       evaluated.add(new EvaluatedEntry(skyKey, evaluationSuccessState.get(), state));
     }
   }
@@ -259,7 +255,7 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
   }
 
   /** A mock skyframe-aware action that counts how many times it was executed. */
-  private static class SkyframeAwareExecutionCountingAction
+  private static final class SkyframeAwareExecutionCountingAction
       extends ExecutionCountingCacheBypassingAction implements SkyframeAwareAction {
     private final SkyKey actionDepKey;
 
@@ -271,9 +267,7 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
 
     @Override
     public Object processSkyframeValues(
-        ImmutableList<? extends SkyKey> keys,
-        SkyframeIterableResult values,
-        boolean valuesMissing) {
+        ImmutableList<? extends SkyKey> keys, SkyframeLookupResult values, boolean valuesMissing) {
       assertThat(keys).containsExactly(actionDepKey);
       return null;
     }
@@ -443,12 +437,12 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
         options,
         null,
         null,
-        /* trustRemoteArtifacts= */ false);
+        RemoteArtifactChecker.IGNORE_ALL);
 
     // Check that our invalidation receiver is working correctly. We'll rely on it again.
     SkyKey actionKey = ActionLookupData.create(ACTION_LOOKUP_KEY, 0);
     TrackingEvaluationProgressReceiver.EvaluatedEntry evaluatedAction =
-        progressReceiver.getEvalutedEntry(actionKey);
+        progressReceiver.getEvaluatedEntry(actionKey);
     assertThat(evaluatedAction).isNotNull();
 
     // Mutate the action input if requested.
@@ -471,13 +465,13 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
         options,
         null,
         null,
-        /* trustRemoteArtifacts= */ false);
+        RemoteArtifactChecker.IGNORE_ALL);
 
     if (expectActionIs.dirtied()) {
       assertThat(progressReceiver.wasInvalidated(actionKey)).isTrue();
 
       TrackingEvaluationProgressReceiver.EvaluatedEntry newEntry =
-          progressReceiver.getEvalutedEntry(actionKey);
+          progressReceiver.getEvaluatedEntry(actionKey);
       assertThat(newEntry).isNotNull();
       if (expectActionIs.actuallyClean()) {
         // Action was dirtied but verified clean.
@@ -510,15 +504,15 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
 
   @Test
   public void testCacheCheckingActionWithContentChangingInput() throws Exception {
-    assertActionWithContentChangingInput(/* unconditionalExecution */ false);
+    assertActionWithContentChangingInput(/* unconditionalExecution= */ false);
   }
 
   @Test
   public void testCacheBypassingActionWithContentChangingInput() throws Exception {
-    assertActionWithContentChangingInput(/* unconditionalExecution */ true);
+    assertActionWithContentChangingInput(/* unconditionalExecution= */ true);
   }
 
-  private void assertActionWithContentChangingInput(final boolean unconditionalExecution)
+  private void assertActionWithContentChangingInput(boolean unconditionalExecution)
       throws Exception {
     // Assert that a simple, non-skyframe-aware action is executed twice
     // if its input's content changes between builds.
@@ -539,12 +533,12 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
 
   @Test
   public void testCacheCheckingActionWithMtimeChangingInput() throws Exception {
-    assertActionWithMtimeChangingInput(/* unconditionalExecution */ false);
+    assertActionWithMtimeChangingInput(/* unconditionalExecution= */ false);
   }
 
   @Test
   public void testCacheBypassingActionWithMtimeChangingInput() throws Exception {
-    assertActionWithMtimeChangingInput(/* unconditionalExecution */ true);
+    assertActionWithMtimeChangingInput(/* unconditionalExecution= */ true);
   }
 
   private void assertActionWithMtimeChangingInput(final boolean unconditionalExecution)
@@ -570,16 +564,15 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
 
   @Test
   public void testCacheCheckingActionWithNonChangingInput() throws Exception {
-    assertActionWithNonChangingInput(/* unconditionalExecution */ false);
+    assertActionWithNonChangingInput(/* unconditionalExecution= */ false);
   }
 
   @Test
   public void testCacheBypassingActionWithNonChangingInput() throws Exception {
-    assertActionWithNonChangingInput(/* unconditionalExecution */ true);
+    assertActionWithNonChangingInput(/* unconditionalExecution= */ true);
   }
 
-  private void assertActionWithNonChangingInput(final boolean unconditionalExecution)
-      throws Exception {
+  private void assertActionWithNonChangingInput(boolean unconditionalExecution) throws Exception {
     // Assert that a simple, non-skyframe-aware action is executed only once
     // if its input does not change at all between builds.
     assertActionExecutions(
@@ -850,7 +843,7 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
           @Override
           public Object processSkyframeValues(
               ImmutableList<? extends SkyKey> keys,
-              SkyframeIterableResult values,
+              SkyframeLookupResult values,
               boolean valuesMissing) {
             assertThat(keys).isEmpty();
             assertThat(valuesMissing).isFalse();
@@ -882,6 +875,6 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
         options,
         null,
         null,
-        /* trustRemoteArtifacts= */ false);
+        RemoteArtifactChecker.IGNORE_ALL);
   }
 }

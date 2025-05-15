@@ -19,6 +19,7 @@ import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import com.google.common.base.Preconditions;
 import com.google.common.primitives.Longs;
 import java.io.IOException;
+import javax.annotation.Nullable;
 
 /**
  * Utility class for getting digests of files.
@@ -46,6 +47,9 @@ public class DigestUtils {
     /** File system identifier of the file (typically the inode number). */
     private final long nodeId;
 
+    /** Last change time of the file. */
+    private final long changeTime;
+
     /** Last modification time of the file. */
     private final long modifiedTime;
 
@@ -62,6 +66,7 @@ public class DigestUtils {
     public CacheKey(Path path, FileStatus status) throws IOException {
       this.path = path.asFragment();
       this.nodeId = status.getNodeId();
+      this.changeTime = status.getLastChangeTime();
       this.modifiedTime = status.getLastModifiedTime();
       this.size = status.getSize();
     }
@@ -76,6 +81,7 @@ public class DigestUtils {
         CacheKey key = (CacheKey) object;
         return path.equals(key.path)
             && nodeId == key.nodeId
+            && changeTime == key.changeTime
             && modifiedTime == key.modifiedTime
             && size == key.size;
       }
@@ -86,6 +92,7 @@ public class DigestUtils {
       int result = 17;
       result = 31 * result + path.hashCode();
       result = 31 * result + Longs.hashCode(nodeId);
+      result = 31 * result + Longs.hashCode(changeTime);
       result = 31 * result + Longs.hashCode(modifiedTime);
       result = 31 * result + Longs.hashCode(size);
       return result;
@@ -124,6 +131,16 @@ public class DigestUtils {
   }
 
   /**
+   * Clears the cache contents without changing its size. No-op if the cache hasn't yet been
+   * initialized.
+   */
+  public static void clearCache() {
+    if (globalCache != null) {
+      globalCache.invalidateAll();
+    }
+  }
+
+  /**
    * Obtains cache statistics.
    *
    * <p>The cache must have previously been enabled by a call to {@link #configureCache(long)}.
@@ -143,48 +160,57 @@ public class DigestUtils {
    * <p>If {@link Path#getFastDigest} has already been attempted and was not available, call {@link
    * #manuallyComputeDigest} to skip an additional attempt to obtain the fast digest.
    *
-   * @param path Path of the file.
-   * @param fileSize Size of the file. Used to determine if digest calculation should be done
-   *     serially or in parallel. Files larger than a certain threshold will be read serially, in
-   *     order to avoid excessive disk seeks.
+   * <p>Prefer calling {@link #manuallyComputeDigest(Path, FileStatus)} when a recently obtained
+   * {@link FileStatus} is available.
+   *
+   * @param path the file path
+   */
+  public static byte[] getDigestWithManualFallback(Path path, XattrProvider xattrProvider)
+      throws IOException {
+    return getDigestWithManualFallback(path, xattrProvider, null);
+  }
+
+  /**
+   * Same as {@link #getDigestWithManualFallback(Path, XattrProvider)}, but providing the ability to
+   * reuse a recently obtained {@link FileStatus}.
+   *
+   * @param path the file path
+   * @param status a recently obtained file status, if available
    */
   public static byte[] getDigestWithManualFallback(
-      Path path, long fileSize, XattrProvider xattrProvider) throws IOException {
+      Path path, XattrProvider xattrProvider, @Nullable FileStatus status) throws IOException {
     byte[] digest = xattrProvider.getFastDigest(path);
-    return digest != null ? digest : manuallyComputeDigest(path, fileSize);
+    return digest != null ? digest : manuallyComputeDigest(path, status);
   }
 
   /**
-   * Gets the digest of {@code path}, using a constant-time xattr call if the filesystem supports
-   * it, and calculating the digest manually otherwise.
+   * Calculates a digest manually (i.e., assuming that a fast digest can't obtained).
    *
-   * <p>Unlike {@link #getDigestWithManualFallback}, will not rate-limit manual digesting of files,
-   * so only use this method if the file size is truly unknown and you don't expect many concurrent
-   * manual digests of large files.
+   * <p>Prefer calling {@link #manuallyComputeDigest(Path, FileStatus)} when a recently obtained
+   * {@link FileStatus} is available.
    *
-   * @param path Path of the file.
+   * @param path the file path
    */
-  public static byte[] getDigestWithManualFallbackWhenSizeUnknown(
-      Path path, XattrProvider xattrProvider) throws IOException {
-    return getDigestWithManualFallback(path, -1, xattrProvider);
+  public static byte[] manuallyComputeDigest(Path path) throws IOException {
+    return manuallyComputeDigest(path, null);
   }
 
   /**
-   * Calculates the digest manually.
+   * Same as {@link #manuallyComputeDigest(Path)}, but providing the ability to reuse a recently
+   * obtained {@link FileStatus}.
    *
-   * @param path Path of the file.
-   * @param fileSize Size of the file. Used to determine if digest calculation should be done
-   *     serially or in parallel. Files larger than a certain threshold will be read serially, in
-   *     order to avoid excessive disk seeks.
+   * @param path the file path
+   * @param status a recently obtained file status, if available
    */
-  public static byte[] manuallyComputeDigest(Path path, long fileSize) throws IOException {
+  public static byte[] manuallyComputeDigest(Path path, @Nullable FileStatus status)
+      throws IOException {
     byte[] digest;
 
     // Attempt a cache lookup if the cache is enabled.
     Cache<CacheKey, byte[]> cache = globalCache;
     CacheKey key = null;
     if (cache != null) {
-      key = new CacheKey(path, path.stat());
+      key = new CacheKey(path, status != null ? status : path.stat());
       digest = cache.getIfPresent(key);
       if (digest != null) {
         return digest;
@@ -193,7 +219,7 @@ public class DigestUtils {
 
     digest = path.getDigest();
 
-    Preconditions.checkNotNull(digest, "Missing digest for %s (size %s)", path, fileSize);
+    Preconditions.checkNotNull(digest, "Missing digest for %s", path);
     if (cache != null) {
       cache.put(key, digest);
     }

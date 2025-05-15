@@ -24,10 +24,12 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.ThreadStateReceiver;
+import com.google.devtools.build.lib.analysis.config.FeatureSet;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.events.Event;
+import com.google.devtools.build.lib.packages.License.LicenseType;
 import com.google.devtools.build.lib.packages.PackageValidator.InvalidPackageException;
 import com.google.devtools.build.lib.packages.util.PackageLoadingTestCase;
 import com.google.devtools.build.lib.vfs.DigestHashFunction;
@@ -260,10 +262,12 @@ public final class PackageFactoryTest extends PackageLoadingTestCase {
 
   @Test
   public void testCreationOfInputFiles() throws Exception {
+    setBuildLanguageOptions("--incompatible_no_implicit_file_export");
     scratch.file(
         "foo/BUILD",
-        "exports_files(['Z'])",
-        "cc_library(name='W', deps=['X', 'Y'])",
+        "exports_files(['Z'], visibility=[\"//visibility:public\"],"
+            + " licenses=[\"restricted\"])",
+        "cc_library(name='W', deps=['X', 'Y', 'A'])",
         "cc_library(name='X', srcs=['X'])",
         "cc_library(name='Y')");
     Package pkg = loadPackage("foo");
@@ -275,24 +279,38 @@ public final class PackageFactoryTest extends PackageLoadingTestCase {
     // Y is a rule
     assertThat(pkg.getTarget("Y").getClass()).isSameInstanceAs(Rule.class);
 
-    // Z is a file
-    assertThat(pkg.getTarget("Z").getClass()).isSameInstanceAs(InputFile.class);
+    // Z is an export file with specified visibility and license specified
+    Target exportFileTarget = pkg.getTarget("Z");
+    assertThat(exportFileTarget.getClass())
+        .isSameInstanceAs(VisibilityLicenseSpecifiedInputFile.class);
+    assertThat(((VisibilityLicenseSpecifiedInputFile) exportFileTarget).isVisibilitySpecified())
+        .isTrue();
+    assertThat(exportFileTarget.getVisibility().getDeclaredLabels())
+        .containsExactly(RuleVisibility.PUBLIC_LABEL);
+    assertThat(((VisibilityLicenseSpecifiedInputFile) exportFileTarget).isLicenseSpecified())
+        .isTrue();
+    assertThat(exportFileTarget.getLicense().getLicenseTypes())
+        .containsExactly(LicenseType.RESTRICTED);
 
-    // A is nothing
-    NoSuchTargetException e = assertThrows(NoSuchTargetException.class, () -> pkg.getTarget("A"));
+    // A is an input file with private visibility
+    Target inputFileTarget = pkg.getTarget("A");
+    assertThat(inputFileTarget.getClass()).isSameInstanceAs(PrivateVisibilityInputFile.class);
+    assertThat(((PrivateVisibilityInputFile) inputFileTarget).isVisibilitySpecified()).isTrue();
+    assertThat(inputFileTarget.getVisibility().getDeclaredLabels())
+        .containsExactly(RuleVisibility.PRIVATE_LABEL);
+
+    // B is nothing
+    NoSuchTargetException e = assertThrows(NoSuchTargetException.class, () -> pkg.getTarget("B"));
     assertThat(e)
         .hasMessageThat()
-        .isEqualTo(
-            "no such target '//foo:A': target 'A' not declared in package 'foo' defined by"
-                + " /workspace/foo/BUILD (Tip: use `query //foo:*` to see all the targets in that"
-                + " package)");
+        .contains("no such target '//foo:B': target 'B' not declared in package 'foo'");
 
     // These are the only input files: BUILD, Z
     Set<String> inputFiles = Sets.newTreeSet();
     for (InputFile inputFile : pkg.getTargets(InputFile.class)) {
       inputFiles.add(inputFile.getName());
     }
-    assertThat(Lists.newArrayList(inputFiles)).containsExactly("BUILD", "Z").inOrder();
+    assertThat(Lists.newArrayList(inputFiles)).containsExactly("A", "BUILD", "Z").inOrder();
   }
 
   @Test
@@ -422,9 +440,9 @@ public final class PackageFactoryTest extends PackageLoadingTestCase {
     assertThat(e)
         .hasMessageThat()
         .isEqualTo(
-            "no such target '//x:z.cc': target 'z.cc' not declared in package 'x' defined by"
-                + " /workspace/x/BUILD (did you mean 'x.cc'? Tip: use `query //x:*` to see all the"
-                + " targets in that package)");
+            "no such target '//x:z.cc': "
+                + "target 'z.cc' not declared in package 'x' "
+                + "defined by /workspace/x/BUILD (did you mean x.cc?)");
 
     e = assertThrows(NoSuchTargetException.class, () -> pkg.getTarget("dir"));
     assertThat(e)
@@ -439,7 +457,7 @@ public final class PackageFactoryTest extends PackageLoadingTestCase {
   public void testTestSuitesImplicitlyDependOnAllRulesInPackage() throws Exception {
     scratch.file(
         "x/BUILD",
-        "java_test(name='j')",
+        "java_test(name='j', tags = ['nodeployjar'])",
         "test_suite(name='t1')",
         "test_suite(name='t2', tests=[])",
         "test_suite(name='t3', tests=['//foo'])",
@@ -804,7 +822,7 @@ public final class PackageFactoryTest extends PackageLoadingTestCase {
   @Test
   public void testPackageSpecMinimal() throws Exception {
     Package pkg = expectEvalSuccess("package(default_visibility=[])");
-    assertThat(pkg.getDefaultVisibility()).isNotNull();
+    assertThat(pkg.getPackageArgs().defaultVisibility()).isNotNull();
   }
 
   @Test
@@ -833,14 +851,14 @@ public final class PackageFactoryTest extends PackageLoadingTestCase {
   @Test
   public void testDefaultTestonly() throws Exception {
     Package pkg = expectEvalSuccess("package(default_testonly = 1)");
-    assertThat(pkg.getDefaultTestOnly()).isTrue();
+    assertThat(pkg.getPackageArgs().defaultTestOnly()).isTrue();
   }
 
   @Test
   public void testDefaultDeprecation() throws Exception {
     String testMessage = "OMG PONIES!";
     Package pkg = expectEvalSuccess("package(default_deprecation = \"" + testMessage + "\")");
-    assertThat(pkg.getDefaultDeprecation()).isEqualTo(testMessage);
+    assertThat(pkg.getPackageArgs().defaultDeprecation()).isEqualTo(testMessage);
   }
 
   @Test
@@ -909,7 +927,8 @@ public final class PackageFactoryTest extends PackageLoadingTestCase {
         "package(features=['b', 'c'])",
         "sh_library(name='after')");
     Package pkg = loadPackage("a");
-    assertThat(pkg.getFeatures()).containsExactly("b", "c");
+    assertThat(pkg.getPackageArgs().features())
+        .isEqualTo(FeatureSet.parse(ImmutableList.of("b", "c")));
   }
 
   @Test
@@ -1108,26 +1127,28 @@ public final class PackageFactoryTest extends PackageLoadingTestCase {
             "    default_compatible_with=['//foo'],",
             "    default_restricted_to=['//bar'],",
             ")");
-    assertThat(pkg.getDefaultCompatibleWith()).containsExactly(Label.parseCanonical("//foo"));
-    assertThat(pkg.getDefaultRestrictedTo()).containsExactly(Label.parseCanonical("//bar"));
+    assertThat(pkg.getPackageArgs().defaultCompatibleWith())
+        .containsExactly(Label.parseCanonical("//foo"));
+    assertThat(pkg.getPackageArgs().defaultRestrictedTo())
+        .containsExactly(Label.parseCanonical("//bar"));
   }
 
   @Test
   public void testPackageDefaultCompatibilityDuplicates() throws Exception {
     expectEvalError(
-        "'//foo:foo' is duplicated in the 'default_compatible_with' list",
+        "duplicate label(s) in default_compatible_with: //foo:foo",
         "package(default_compatible_with=['//foo', '//bar', '//foo'])");
   }
 
   @Test
   public void testPackageDefaultRestrictionDuplicates() throws Exception {
     expectEvalError(
-        "'//foo:foo' is duplicated in the 'default_restricted_to' list",
+        "duplicate label(s) in default_restricted_to: //foo:foo",
         "package(default_restricted_to=['//foo', '//bar', '//foo'])");
   }
 
   @Test
-  public void testGlobPatternExtractor() {
+  public void testGlobPatternExtractor() throws Exception {
     StarlarkFile file =
         StarlarkFile.parse(
             ParserInput.fromLines(
@@ -1142,8 +1163,7 @@ public final class PackageFactoryTest extends PackageLoadingTestCase {
     List<String> globs = new ArrayList<>();
     List<String> globsWithDirs = new ArrayList<>();
     List<String> subpackages = new ArrayList<>();
-    PackageFactory.checkBuildSyntax(
-        file, globs, globsWithDirs, subpackages, new HashMap<>(), /* errors= */ null);
+    PackageFactory.checkBuildSyntax(file, globs, globsWithDirs, subpackages, new HashMap<>());
     assertThat(globs).containsExactly("ab", "a", "**/*");
     assertThat(globsWithDirs).containsExactly("c");
     assertThat(subpackages).isEmpty();
@@ -1169,14 +1189,14 @@ public final class PackageFactoryTest extends PackageLoadingTestCase {
   public void testForStatementForbiddenInBuild() throws Exception {
     checkBuildDialectError(
         "for _ in []: pass", //
-        "for statements are not allowed in BUILD files");
+        "`for` statements are not allowed in BUILD files");
   }
 
   @Test
   public void testIfStatementForbiddenInBuild() throws Exception {
     checkBuildDialectError(
         "if False: pass", //
-        "if statements are not allowed in BUILD files");
+        "`if` statements are not allowed in BUILD files");
   }
 
   @Test

@@ -14,13 +14,19 @@
 # limitations under the License.
 
 import os
-import unittest
+from absl.testing import absltest
 from src.test.py.bazel import test_base
 
 
 class BazelWorkspaceTest(test_base.TestBase):
 
+  def setUp(self):
+    test_base.TestBase.setUp(self)
+    self.DisableBzlmod()
+
   def testWorkspaceDotBazelFileInMainRepo(self):
+    # Make sure no existing MODULE.bazel file.
+    os.remove("MODULE.bazel")
     workspace_dot_bazel = self.ScratchFile("WORKSPACE.bazel")
     self.ScratchFile("BUILD", [
         "py_binary(",
@@ -29,13 +35,14 @@ class BazelWorkspaceTest(test_base.TestBase):
         ")",
     ])
     self.ScratchFile("bin.py")
-    exit_code, _, stderr = self.RunBazel(["build", "//:bin"])
-    self.AssertExitCode(exit_code, 0, stderr)
+    self.RunBazel(["build", "//:bin"])
 
     # If WORKSPACE.bazel is deleted and no WORKSPACE exists,
     # the build should fail.
     os.remove(workspace_dot_bazel)
-    exit_code, _, stderr = self.RunBazel(["build", "//:bin"])
+    exit_code, _, stderr = self.RunBazel(
+        ["build", "//:bin"], allow_failure=True
+    )
     self.AssertExitCode(exit_code, 2, stderr)
 
   def testWorkspaceDotBazelFileWithExternalRepo(self):
@@ -53,7 +60,15 @@ class BazelWorkspaceTest(test_base.TestBase):
     # Test WORKSPACE.bazel takes priority over WORKSPACE
     self.ScratchFile("B/WORKSPACE")
     workspace_dot_bazel = self.ScratchFile(
-        "B/WORKSPACE.bazel", ["local_repository(name = 'A', path='../A')"])
+        "B/WORKSPACE.bazel",
+        [
+            (
+                'load("@bazel_tools//tools/build_defs/repo:local.bzl",'
+                ' "local_repository")'
+            ),
+            "local_repository(name = 'A', path='../A')",
+        ],
+    )
     self.ScratchFile("B/bin.py")
     self.ScratchFile("B/BUILD", [
         "py_binary(",
@@ -62,22 +77,30 @@ class BazelWorkspaceTest(test_base.TestBase):
         "  deps = ['@A//:lib'],",
         ")",
     ])
-    exit_code, _, stderr = self.RunBazel(args=["build", ":bin"], cwd=work_dir)
-    self.AssertExitCode(exit_code, 0, stderr)
+    self.RunBazel(args=["build", ":bin"], cwd=work_dir)
 
     # Test WORKSPACE takes effect after deleting WORKSPACE.bazel
     os.remove(workspace_dot_bazel)
-    exit_code, _, stderr = self.RunBazel(args=["build", ":bin"], cwd=work_dir)
+    exit_code, _, stderr = self.RunBazel(
+        args=["build", ":bin"], cwd=work_dir, allow_failure=True
+    )
     self.AssertExitCode(exit_code, 1, stderr)
-    self.assertIn("no such package '@A//'", "".join(stderr))
+    self.assertIn("no such package '@@A//'", "".join(stderr))
 
     # Test a WORKSPACE.bazel directory won't confuse Bazel
-    self.ScratchFile("B/WORKSPACE",
-                     ["local_repository(name = 'A', path='../A')"])
+    self.ScratchFile(
+        "B/WORKSPACE",
+        [
+            (
+                'load("@bazel_tools//tools/build_defs/repo:local.bzl",'
+                ' "local_repository")'
+            ),
+            "local_repository(name = 'A', path='../A')",
+        ],
+    )
     self.ScratchDir("B/WORKSPACE.bazel")
-    exit_code, _, stderr = self.RunBazel(args=["build", ":bin"], cwd=work_dir)
-    self.AssertExitCode(exit_code, 0, stderr)
+    self.RunBazel(args=["build", ":bin"], cwd=work_dir)
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

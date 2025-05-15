@@ -19,9 +19,11 @@ import static java.util.Map.Entry.comparingByKey;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Ordering;
+import com.google.devtools.build.lib.cmdline.Label;
 import java.io.File;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
 
@@ -41,6 +43,8 @@ public class CommandFailureUtils {
     void describeCommandCwd(String cwd, StringBuilder message);
     void describeCommandEnvPrefix(StringBuilder message, boolean isolated);
     void describeCommandEnvVar(StringBuilder message, Map.Entry<String, String> entry);
+
+    void describeCommandUnsetEnvVar(StringBuilder message, String name);
     /**
      * Formats the command element and adds it to the message.
      *
@@ -84,6 +88,12 @@ public class CommandFailureUtils {
     }
 
     @Override
+    public void describeCommandUnsetEnvVar(StringBuilder message, String name) {
+      // Only the short form of --unset is supported on macOS.
+      message.append("-u ").append(ShellEscaper.escapeString(name)).append(" \\\n  ");
+    }
+
+    @Override
     public void describeCommandElement(
         StringBuilder message, String commandElement, boolean isBinary) {
       message.append(ShellEscaper.escapeString(commandElement));
@@ -124,6 +134,11 @@ public class CommandFailureUtils {
     }
 
     @Override
+    public void describeCommandUnsetEnvVar(StringBuilder message, String name) {
+      message.append("SET ").append(name).append('=').append("\n  ");
+    }
+
+    @Override
     public void describeCommandElement(
         StringBuilder message, String commandElement, boolean isBinary) {
       // Replace the forward slashes with back slashes if the `commandElement` is the binary path
@@ -156,9 +171,10 @@ public class CommandFailureUtils {
       boolean prettyPrintArgs,
       Collection<String> commandLineElements,
       @Nullable Map<String, String> environment,
+      @Nullable List<String> environmentVariablesToClear,
       @Nullable String cwd,
       @Nullable String configurationChecksum,
-      @Nullable String executionPlatformAsLabelString) {
+      @Nullable Label executionPlatformLabel) {
 
     Preconditions.checkNotNull(form);
     StringBuilder message = new StringBuilder();
@@ -205,6 +221,12 @@ public class CommandFailureUtils {
       if (environment != null) {
         describeCommandImpl.describeCommandEnvPrefix(
             message, form != CommandDescriptionForm.COMPLETE_UNISOLATED);
+        if (environmentVariablesToClear != null) {
+          for (String name : Ordering.natural().sortedCopy(environmentVariablesToClear)) {
+            message.append("  ");
+            describeCommandImpl.describeCommandUnsetEnvVar(message, name);
+          }
+        }
         // A map can never have two keys with the same value, so we only need to compare the keys.
         Comparator<Map.Entry<String, String>> mapEntryComparator = comparingByKey();
         for (Map.Entry<String, String> entry :
@@ -246,9 +268,9 @@ public class CommandFailureUtils {
         message.append("# Configuration: ").append(configurationChecksum);
       }
 
-      if (executionPlatformAsLabelString != null) {
+      if (executionPlatformLabel != null) {
         message.append("\n");
-        message.append("# Execution platform: ").append(executionPlatformAsLabelString);
+        message.append("# Execution platform: ").append(executionPlatformLabel);
       }
     }
 
@@ -257,17 +279,18 @@ public class CommandFailureUtils {
 
   /**
    * Construct an error message that describes a failed command invocation. Currently this returns a
-   * message of the form "foo failed: error executing command /dir/foo bar baz".
+   * message of the form "foo failed: error executing FooCompile command /dir/foo bar baz".
    */
   @VisibleForTesting
   static String describeCommandFailure(
       boolean verbose,
+      String mnemonic,
       Collection<String> commandLineElements,
       Map<String, String> env,
       @Nullable String cwd,
       @Nullable String configurationChecksum,
-      @Nullable String targetLabel,
-      @Nullable String executionPlatformAsLabelString) {
+      @Nullable Label targetLabel,
+      @Nullable Label executionPlatformLabel) {
 
     String commandName = commandLineElements.iterator().next();
     // Extract the part of the command name after the last "/", if any.
@@ -278,7 +301,9 @@ public class CommandFailureUtils {
         : CommandDescriptionForm.ABBREVIATED;
 
     StringBuilder output = new StringBuilder();
-    output.append("error executing command ");
+    output.append("error executing ");
+    output.append(mnemonic);
+    output.append(" command ");
     if (targetLabel != null) {
       output.append("(from target ").append(targetLabel).append(") ");
     }
@@ -291,9 +316,10 @@ public class CommandFailureUtils {
             /* prettyPrintArgs= */ false,
             commandLineElements,
             env,
+            null,
             cwd,
             configurationChecksum,
-            executionPlatformAsLabelString));
+            executionPlatformLabel));
     return shortCommandName + " failed: " + output;
   }
 
@@ -301,11 +327,12 @@ public class CommandFailureUtils {
       boolean verboseFailures, @Nullable String cwd, DescribableExecutionUnit command) {
     return describeCommandFailure(
         verboseFailures,
+        command.getMnemonic(),
         command.getArguments(),
         command.getEnvironment(),
         cwd,
         command.getConfigurationChecksum(),
         command.getTargetLabel(),
-        command.getExecutionPlatformLabelString());
+        command.getExecutionPlatformLabel());
   }
 }

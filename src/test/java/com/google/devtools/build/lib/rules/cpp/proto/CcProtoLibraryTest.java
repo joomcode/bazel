@@ -25,10 +25,11 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
-import com.google.devtools.build.lib.bazel.rules.cpp.proto.BazelCcProtoAspect;
+import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.packages.AspectParameters;
+import com.google.devtools.build.lib.packages.StarlarkAspectClass;
 import com.google.devtools.build.lib.packages.util.Crosstool.CcToolchainConfig;
 import com.google.devtools.build.lib.packages.util.MockProtoSupport;
 import com.google.devtools.build.lib.rules.cpp.CcCompilationContext;
@@ -47,8 +48,17 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class CcProtoLibraryTest extends BuildViewTestCase {
 
+  private final StarlarkAspectClass starlarkCcProtoAspect =
+      new StarlarkAspectClass(
+          Label.parseCanonicalUnchecked("@_builtins//:common/cc/cc_proto_library.bzl"),
+          "cc_proto_aspect");
+
   @Before
   public void setUp() throws Exception {
+    MockProtoSupport.setup(mockToolsConfig);
+    scratch.file(
+        "third_party/bazel_rules/rules_cc/cc/proto/BUILD",
+        "toolchain_type(name = 'toolchain_type', visibility = ['//visibility:public'])");
     scratch.file("protobuf/WORKSPACE");
     scratch.overwriteFile(
         "protobuf/BUILD",
@@ -72,8 +82,32 @@ public class CcProtoLibraryTest extends BuildViewTestCase {
         "    name = 'com_google_protobuf',",
         "    path = 'protobuf',",
         ")");
-    MockProtoSupport.setupWorkspace(scratch);
     invalidatePackages(); // A dash of magic to re-evaluate the WORKSPACE file.
+  }
+
+  @Test
+  public void protoToolchainResolution_enabled() throws Exception {
+    setBuildLanguageOptions("--incompatible_enable_proto_toolchain_resolution");
+    getAnalysisMock()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder()
+                .withFeatures(
+                    CppRuleClasses.SUPPORTS_DYNAMIC_LINKER,
+                    CppRuleClasses.SUPPORTS_INTERFACE_SHARED_LIBRARIES));
+    scratch.file(
+        "x/BUILD",
+        TestConstants.LOAD_PROTO_LIBRARY,
+        "cc_proto_library(name = 'foo_cc_proto', deps = ['foo_proto'])",
+        "proto_library(name = 'foo_proto', srcs = ['foo.proto'])");
+    assertThat(prettyArtifactNames(getFilesToBuild(getConfiguredTarget("//x:foo_cc_proto"))))
+        .containsExactly(
+            "x/foo.pb.h",
+            "x/foo.pb.cc",
+            "x/libfoo_proto.a",
+            "x/libfoo_proto.ifso",
+            "x/libfoo_proto.so");
   }
 
   @Test
@@ -213,6 +247,7 @@ public class CcProtoLibraryTest extends BuildViewTestCase {
 
   @Test
   public void outputDirectoryForProtoCompileAction_externalRepos() throws Exception {
+    setBuildLanguageOptions("--experimental_builtins_injection_override=+cc_proto_library");
     scratch.file(
         "x/BUILD", "cc_proto_library(name = 'foo_cc_proto', deps = ['@bla//foo:bar_proto'])");
 
@@ -245,7 +280,7 @@ public class CcProtoLibraryTest extends BuildViewTestCase {
             targetConfig.getGenfilesDirectory(RepositoryName.create("bla")),
             getOwnerForAspect(
                 getConfiguredTarget("@bla//foo:bar_proto"),
-                ruleClassProvider.getNativeAspectClass(BazelCcProtoAspect.class.getSimpleName()),
+                starlarkCcProtoAspect,
                 AspectParameters.EMPTY));
     CcCompilationContext ccCompilationContext =
         target.get(CcInfo.PROVIDER).getCcCompilationContext();

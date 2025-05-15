@@ -28,10 +28,12 @@ import com.google.devtools.build.lib.analysis.actions.CustomCommandLine.VectorAr
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration.OneVersionEnforcementLevel;
-import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skyframe.serialization.VisibleForSerialization;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.SerializationConstant;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import javax.annotation.Nullable;
 
 /** Utility for generating a call to the one-version binary. */
 public final class OneVersionCheckActionBuilder {
@@ -39,7 +41,6 @@ public final class OneVersionCheckActionBuilder {
   private OneVersionCheckActionBuilder() {}
 
   private OneVersionEnforcementLevel enforcementLevel;
-  private Artifact outputArtifact;
   private JavaToolchainProvider javaToolchain;
   private NestedSet<Artifact> jarsToCheck;
 
@@ -60,12 +61,6 @@ public final class OneVersionCheckActionBuilder {
   }
 
   @CanIgnoreReturnValue
-  public OneVersionCheckActionBuilder outputArtifact(Artifact outputArtifact) {
-    this.outputArtifact = outputArtifact;
-    return this;
-  }
-
-  @CanIgnoreReturnValue
   public OneVersionCheckActionBuilder withEnforcementLevel(
       OneVersionEnforcementLevel enforcementLevel) {
     Preconditions.checkArgument(
@@ -76,18 +71,25 @@ public final class OneVersionCheckActionBuilder {
     return this;
   }
 
-  public Artifact build(RuleContext ruleContext) {
+  @Nullable
+  public Artifact build(RuleContext ruleContext) throws InterruptedException, RuleErrorException {
     Preconditions.checkNotNull(enforcementLevel);
-    Preconditions.checkNotNull(outputArtifact);
     Preconditions.checkNotNull(javaToolchain);
     Preconditions.checkNotNull(jarsToCheck);
 
     FilesToRunProvider oneVersionTool = javaToolchain.getOneVersionBinary();
-    Artifact oneVersionAllowlist = javaToolchain.getOneVersionAllowlist();
-    if (oneVersionTool == null || oneVersionAllowlist == null) {
-      addRuleErrorForMissingArtifacts(ruleContext, javaToolchain);
-      return outputArtifact;
+    Artifact oneVersionAllowlist;
+    if (ruleContext.isTestTarget()) {
+      oneVersionAllowlist = javaToolchain.oneVersionAllowlistForTests();
+    } else {
+      oneVersionAllowlist = javaToolchain.getOneVersionAllowlist();
     }
+    if (oneVersionTool == null || oneVersionAllowlist == null) {
+      return null;
+    }
+
+    Artifact outputArtifact =
+        ruleContext.getImplicitOutputArtifact(JavaSemantics.JAVA_ONE_VERSION_ARTIFACT);
 
     CustomCommandLine.Builder oneVersionArgsBuilder =
         CustomCommandLine.builder()
@@ -113,22 +115,11 @@ public final class OneVersionCheckActionBuilder {
     return outputArtifact;
   }
 
-  public static void addRuleErrorForMissingArtifacts(
-      RuleContext ruleContext, JavaToolchainProvider javaToolchain) {
-    ruleContext.ruleError(
-        String.format(
-            "one version enforcement was requested but it is not supported by the current "
-                + "Java toolchain '%s'; see the "
-                + "java_toolchain.oneversion and java_toolchain.oneversion_allowlist "
-                + "attributes",
-            javaToolchain.getToolchainLabel()));
-  }
-
   static VectorArg<String> jarAndTargetVectorArg(NestedSet<Artifact> jarsToCheck) {
     return VectorArg.of(jarsToCheck).mapped(EXPAND_TO_JAR_AND_TARGET);
   }
 
-  @SerializationConstant @AutoCodec.VisibleForSerialization
+  @SerializationConstant @VisibleForSerialization
   static final CommandLineItem.MapFn<Artifact> EXPAND_TO_JAR_AND_TARGET =
       (jar, args) ->
           args.accept(jar.getExecPathString() + "," + getArtifactOwnerGeneralizedLabel(jar));

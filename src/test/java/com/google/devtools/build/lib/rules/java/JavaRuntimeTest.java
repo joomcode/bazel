@@ -25,6 +25,8 @@ import com.google.devtools.build.lib.analysis.TemplateVariableInfo;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.analysis.platform.ToolchainInfo;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
+import com.google.devtools.build.lib.packages.Info;
+import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import net.starlark.java.eval.EvalException;
 import org.junit.Before;
@@ -32,7 +34,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-/** {@link JavaRuntime}Test. */
+/** Tests for the java_runtime rule. */
 @RunWith(JUnit4.class)
 public class JavaRuntimeTest extends BuildViewTestCase {
   @Before
@@ -49,9 +51,10 @@ public class JavaRuntimeTest extends BuildViewTestCase {
         ")");
   }
 
-  private JavaRuntimeInfo getJavaRuntimeInfo(ProviderCollection collection) throws EvalException {
+  private JavaRuntimeInfo getJavaRuntimeInfo(ProviderCollection collection)
+      throws EvalException, RuleErrorException {
     ToolchainInfo toolchainInfo = collection.get(ToolchainInfo.PROVIDER);
-    return (JavaRuntimeInfo) toolchainInfo.getValue("java_runtime");
+    return JavaRuntimeInfo.PROVIDER.wrap(toolchainInfo.getValue("java_runtime", Info.class));
   }
 
   @Test
@@ -189,7 +192,6 @@ public class JavaRuntimeTest extends BuildViewTestCase {
         ")",
         "java_runtime(",
         "    name = 'jvm', ",
-        "    srcs = glob(['generated_java_home/**']), ",
         "    java = 'generated_java_home/bin/java', ",
         "    java_home = 'generated_java_home',",
         ")");
@@ -198,11 +200,28 @@ public class JavaRuntimeTest extends BuildViewTestCase {
         .isEqualTo(getGenfilesArtifactWithNoOwner("a/generated_java_home").getExecPathString());
   }
 
+  @Test
+  public void javaRuntimeVersion_isAccessibleByNativeCode() throws Exception {
+    scratch.file(
+        "a/BUILD", //
+        "genrule(name='gen',",
+        "    cmd = '', ",
+        "    outs = ['generated_java_home/bin/java'],",
+        ")",
+        "java_runtime(",
+        "    name = 'jvm', ",
+        "    java = 'generated_java_home/bin/java', ",
+        "    java_home = 'generated_java_home',",
+        "    version = 234,",
+        ")");
+    ConfiguredTarget jvm = getConfiguredTarget("//a:jvm");
+    assertThat(getJavaRuntimeInfo(jvm).version()).isEqualTo(234);
+  }
+
   // bypass default toolchain flags added by BuildViewTestCase#useConfiguration
   // TODO(cushon): delete this helper method once useConfiguration stops passing toolchain flags
   private void useConfigurationInternal(String... args) throws Exception {
-    masterConfig = createConfigurations(ImmutableMap.of(), args);
-    targetConfig = getTargetConfiguration();
+    targetConfig = createConfiguration(ImmutableMap.of(), args);
     targetConfigKey = targetConfig.getKey();
     createBuildView();
   }

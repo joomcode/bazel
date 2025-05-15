@@ -89,7 +89,10 @@ public class AndroidInstrumentationTestBase implements RuleConfiguredTargetFacto
             .addArtifact(testExecutable)
             .addArtifact(getInstrumentationApk(ruleContext))
             .addArtifact(getTargetApk(ruleContext))
-            .addTargets(runfilesDeps, RunfilesProvider.DEFAULT_RUNFILES)
+            .addTargets(
+                runfilesDeps,
+                RunfilesProvider.DEFAULT_RUNFILES,
+                ruleContext.getConfiguration().alwaysIncludeFilesToBuildInData())
             .addTransitiveArtifacts(AndroidCommon.getSupportApks(ruleContext))
             .addTransitiveArtifacts(getAdb(ruleContext).getFilesToRun())
             .merge(getAapt(ruleContext).getRunfilesSupport())
@@ -257,12 +260,12 @@ public class AndroidInstrumentationTestBase implements RuleConfiguredTargetFacto
   }
 
   /** ADB binary from the Android SDK. */
-  private static FilesToRunProvider getAdb(RuleContext ruleContext) {
+  private static FilesToRunProvider getAdb(RuleContext ruleContext) throws RuleErrorException {
     return AndroidSdkProvider.fromRuleContext(ruleContext).getAdb();
   }
 
   /** AAPT binary from the Android SDK. */
-  private static FilesToRunProvider getAapt(RuleContext ruleContext) {
+  private static FilesToRunProvider getAapt(RuleContext ruleContext) throws RuleErrorException {
     return AndroidSdkProvider.fromRuleContext(ruleContext).getAapt();
   }
 

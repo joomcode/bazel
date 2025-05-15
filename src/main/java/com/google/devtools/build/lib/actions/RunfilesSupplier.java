@@ -14,12 +14,14 @@
 
 package com.google.devtools.build.lib.actions;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.devtools.build.lib.analysis.SymlinkEntry;
+import com.google.devtools.build.lib.analysis.config.BuildConfigurationValue.RunfileSymlinksMode;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.Map;
+import javax.annotation.Nullable;
 import net.starlark.java.eval.StarlarkValue;
 
 /** Convenience wrapper around runfiles allowing lazy expansion. */
@@ -30,35 +32,79 @@ import net.starlark.java.eval.StarlarkValue;
 // they are exposed through ctx.resolve_tools[2], for example.
 public interface RunfilesSupplier extends StarlarkValue {
 
-  /** @return the contained artifacts */
+  /** Returns the contained artifacts. */
   NestedSet<Artifact> getArtifacts();
 
-  /** @return the runfiles' root directories. */
+  /** Returns the runfiles' root directories. */
   ImmutableSet<PathFragment> getRunfilesDirs();
 
-  /**
-   * Returns mappings from runfiles directories to artifact mappings in that directory.
-   *
-   * @return runfiles' mappings
-   */
+  /** Returns mappings from runfiles directories to artifact mappings in that directory. */
   ImmutableMap<PathFragment, Map<PathFragment, Artifact>> getMappings();
 
-  /** @return the runfiles manifest artifacts, if any. */
-  ImmutableList<Artifact> getManifests();
+  /**
+   * Returns the {@link RunfileSymlinksMode} for the given {@code runfilesDir}, or {@code null} if
+   * the {@link RunfilesSupplier} doesn't know about the directory.
+   *
+   * @param runfilesDir runfiles directory relative to the exec root
+   */
+  @Nullable
+  RunfileSymlinksMode getRunfileSymlinksMode(PathFragment runfilesDir);
 
   /**
-   * Returns whether for a given {@code runfilesDir} the runfile symlinks are materialized during
-   * build. Also returns {@code false} if the runfiles supplier doesn't know about the directory.
+   * Returns whether the runfile symlinks should be materialized during the build for the given
+   * {@code runfilesDir}, or {@code false} if the {@link RunfilesSupplier} doesn't know about the
+   * directory.
    *
    * @param runfilesDir runfiles directory relative to the exec root
    */
   boolean isBuildRunfileLinks(PathFragment runfilesDir);
 
   /**
-   * Returns whether it's allowed to create runfile symlinks in the {@code runfilesDir}. Also
-   * returns {@code false} if the runfiles supplier doesn't know about the directory.
+   * Returns a {@link RunfilesSupplier} identical to this one, but with the given runfiles
+   * directory.
    *
-   * @param runfilesDir runfiles directory relative to the exec root
+   * <p>Must only be called on suppliers with a single runfiles directory, i.e. {@link
+   * #getRunfilesDirs} returns a set of size 1.
    */
-  boolean isRunfileLinksEnabled(PathFragment runfilesDir);
+  RunfilesSupplier withOverriddenRunfilesDir(PathFragment newRunfilesDir);
+
+  /**
+   * Returns information about the runfiles trees in this supplier for logging purposes.
+   *
+   * <p>The field names are chosen to minimize the diff with the actual RunfilesTree class in Bazel
+   * 8, which simplifies cherry-picks.
+   *
+   * @param getArtifactsAtCanonicalLocationsForLogging Returns artifacts the runfiles tree contain
+   *     symlinks to at their canonical locations.
+   *     <p>This does <b>not</b> include artifacts that only the symlinks and root symlinks point
+   *     to.
+   * @param getEmptyFilenamesForLogging Returns the set of names of implicit empty files to
+   *     materialize.
+   *     <p>If this runfiles tree does not implicitly add empty files, implementations should have a
+   *     dedicated fast path that returns an empty set without traversing the tree.
+   * @param getSymlinksForLogging Returns the set of custom symlink entries.
+   * @param getRootSymlinksForLogging Returns the set of root symlinks.
+   * @param getRepoMappingManifestForLogging Returns the repo mapping manifest if it exists.
+   * @param isLegacyExternalRunfiles Whether this runfiles tree materializes external runfiles also
+   *     at their legacy locations.
+   * @param isMappingCached Whether this runfiles tree is likely to be used by multiple spawns.
+   */
+  record RunfilesTree(
+      PathFragment getExecPath,
+      NestedSet<Artifact> getArtifactsAtCanonicalLocationsForLogging,
+      Iterable<PathFragment> getEmptyFilenamesForLogging,
+      NestedSet<SymlinkEntry> getSymlinksForLogging,
+      NestedSet<SymlinkEntry> getRootSymlinksForLogging,
+      @Nullable Artifact getRepoMappingManifestForLogging,
+      boolean isLegacyExternalRunfiles,
+      boolean isMappingCached) {}
+
+  /**
+   * A map from runfiles middleman artifacts to the {@link RunfilesTree} they represent.
+   *
+   * <p>This is used for the purposes of the execution log only and matches the architecture of
+   * Bazel 8, in which a runfiles tree can be obtained from its middleman via {@link
+   * InputMetadataProvider}.
+   */
+  Map<Artifact, RunfilesTree> getRunfilesTreesForLogging();
 }

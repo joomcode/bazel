@@ -3,6 +3,8 @@ Book: /_book.yaml
 
 # Using Bazel on Windows
 
+{% include "_buttons.html" %}
+
 This page covers Best Practices for using Bazel on Windows. For installation
 instructions, see [Install Bazel on Windows](/install/windows).
 
@@ -266,7 +268,7 @@ To enable the Clang toolchain for building C++, there are several situations.
     --extra_toolchains=@local_config_cc//:cc-toolchain-x64_windows-clang-cl --extra_execution_platforms=//:x64_windows-clang-cl
     ```
 
-    * Register the platform and toolchain in your `WORKSPACE` file:
+    * Register the platform and toolchain in your `MODULE.bazel` file:
 
     ```
     register_execution_platforms(

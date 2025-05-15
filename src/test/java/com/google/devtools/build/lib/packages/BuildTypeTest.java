@@ -18,6 +18,7 @@ import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.testing.EqualsTester;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.cmdline.RepositoryMapping;
@@ -27,8 +28,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import net.starlark.java.eval.Dict;
 import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Starlark;
 import net.starlark.java.eval.StarlarkInt;
+import net.starlark.java.eval.StarlarkList;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -274,7 +278,7 @@ public final class BuildTypeTest {
             Label.create("@//b", "b"),
             Label.parseCanonical(Selector.DEFAULT_CONDITION_KEY),
             Label.create("@//d", "d"));
-    assertThat(selector.getEntries().entrySet()).containsExactlyElementsIn(expectedMap.entrySet());
+    assertThat(selector.mapCopy()).isEqualTo(expectedMap);
   }
 
   /**
@@ -315,8 +319,30 @@ public final class BuildTypeTest {
         "//conditions:a", "//a:a",
         "//conditions:b", "//b:b",
         BuildType.Selector.DEFAULT_CONDITION_KEY, "//d:d");
-    assertThat(new Selector<>(input, null, labelConverter, BuildType.LABEL).getDefault())
-        .isEqualTo(Label.create("@//d", "d"));
+    Selector<Label> selector = new Selector<>(input, null, labelConverter, BuildType.LABEL);
+    assertThat(selector.hasDefault()).isTrue();
+    assertThat(selector.getDefault()).isEqualTo(Label.create("@//d", "d"));
+  }
+
+  @Test
+  public void testSelectorDefault_null() throws Exception {
+    ImmutableMap<String, Object> input =
+        ImmutableMap.of(
+            "//conditions:a", "//a:a", BuildType.Selector.DEFAULT_CONDITION_KEY, Starlark.NONE);
+    Selector<Label> selector = new Selector<>(input, null, labelConverter, BuildType.LABEL);
+    assertThat(selector.hasDefault()).isTrue();
+    assertThat(selector.isUnconditional()).isFalse();
+    assertThat(selector.getDefault()).isNull();
+  }
+
+  @Test
+  public void testSelectorDefault_null_singleton() throws Exception {
+    ImmutableMap<String, Object> input =
+        ImmutableMap.of(BuildType.Selector.DEFAULT_CONDITION_KEY, Starlark.NONE);
+    Selector<Label> selector = new Selector<>(input, null, labelConverter, BuildType.LABEL);
+    assertThat(selector.hasDefault()).isTrue();
+    assertThat(selector.isUnconditional()).isTrue();
+    assertThat(selector.getDefault()).isNull();
   }
 
   @Test
@@ -338,22 +364,18 @@ public final class BuildTypeTest {
             Label.parseCanonical("//conditions:d"));
 
     List<Selector<List<Label>>> selectors = selectorList.getSelectors();
-    assertThat(selectors.get(0).getEntries().entrySet())
-        .containsExactlyElementsIn(
-            ImmutableMap.of(
-                    Label.parseCanonical("//conditions:a"),
-                    ImmutableList.of(Label.create("@//a", "a")),
-                    Label.parseCanonical("//conditions:b"),
-                    ImmutableList.of(Label.create("@//b", "b")))
-                .entrySet());
-    assertThat(selectors.get(1).getEntries().entrySet())
-        .containsExactlyElementsIn(
-            ImmutableMap.of(
-                    Label.parseCanonical("//conditions:c"),
-                    ImmutableList.of(Label.create("@//c", "c")),
-                    Label.parseCanonical("//conditions:d"),
-                    ImmutableList.of(Label.create("@//d", "d")))
-                .entrySet());
+    assertThat(selectors.get(0).mapCopy())
+        .containsExactly(
+            Label.parseCanonical("//conditions:a"),
+            ImmutableList.of(Label.create("@//a", "a")),
+            Label.parseCanonical("//conditions:b"),
+            ImmutableList.of(Label.create("@//b", "b")));
+    assertThat(selectors.get(1).mapCopy())
+        .containsExactly(
+            Label.parseCanonical("//conditions:c"),
+            ImmutableList.of(Label.create("@//c", "c")),
+            Label.parseCanonical("//conditions:d"),
+            ImmutableList.of(Label.create("@//d", "d")));
   }
 
   @Test
@@ -384,20 +406,18 @@ public final class BuildTypeTest {
     assertThat(selectorList.getOriginalType()).isEqualTo(BuildType.LABEL_KEYED_STRING_DICT);
     assertThat(selectorList.getKeyLabels())
         .containsExactly(
-            Label.parseAbsolute("//conditions:a", ImmutableMap.of()),
-            Label.parseAbsolute("//conditions:b", ImmutableMap.of()),
-            Label.parseAbsolute("//conditions:c", ImmutableMap.of()),
-            Label.parseAbsolute("//conditions:d", ImmutableMap.of()));
+            Label.parseCanonical("//conditions:a"),
+            Label.parseCanonical("//conditions:b"),
+            Label.parseCanonical("//conditions:c"),
+            Label.parseCanonical("//conditions:d"));
 
     List<Selector<Map<Label, String>>> selectors = selectorList.getSelectors();
-    assertThat(selectors.get(0).getEntries().entrySet())
-        .containsExactlyElementsIn(
-            ImmutableMap.of(
-                    Label.parseAbsolute("//conditions:a", ImmutableMap.of()),
-                    ImmutableMap.of(Label.create("@//a", "a"), "a"),
-                    Label.parseAbsolute("//conditions:b", ImmutableMap.of()),
-                    ImmutableMap.of(Label.create("@//b", "b"), "b"))
-                .entrySet());
+    assertThat(selectors.get(0).mapCopy())
+        .containsExactly(
+            Label.parseCanonical("//conditions:a"),
+            ImmutableMap.of(Label.create("@//a", "a"), "a"),
+            Label.parseCanonical("//conditions:b"),
+            ImmutableMap.of(Label.create("@//b", "b"), "b"));
   }
 
   @Test
@@ -488,14 +508,78 @@ public final class BuildTypeTest {
     converted =
         BuildType.selectableConvert(BuildType.LABEL_LIST, selectableInput, null, labelConverter);
     BuildType.SelectorList<?> selectorList = (BuildType.SelectorList<?>) converted;
-    assertThat(((Selector<Label>) selectorList.getSelectors().get(0)).getEntries().entrySet())
-        .containsExactlyElementsIn(
-            /* expected: Entry<Label, Label>, actual: Entry<Label, List<Label>> */ ImmutableMap.of(
-                    Label.parseCanonical("//conditions:a"),
-                    expectedLabels,
-                    Label.parseCanonical(Selector.DEFAULT_CONDITION_KEY),
-                    expectedLabels)
-                .entrySet());
+    assertThat(((Selector<Label>) selectorList.getSelectors().get(0)).mapCopy())
+        .containsExactly(
+            Label.parseCanonical("//conditions:a"),
+            expectedLabels,
+            Label.parseCanonical(Selector.DEFAULT_CONDITION_KEY),
+            expectedLabels);
+  }
+
+  @Test
+  @SuppressWarnings({"unchecked"})
+  public void testCopyAndLiftStarlarkList() throws Exception {
+    Object starlarkList = StarlarkList.immutableOf("//a:a1", "//a:a2");
+    ImmutableList<Label> expectedLabels =
+        ImmutableList.of(Label.create("@//a", "a1"), Label.create("@//a", "a2"));
+
+    Object converted =
+        BuildType.copyAndLiftStarlarkValue(
+            "ruleClass",
+            Attribute.attr("attrName", BuildType.LABEL_LIST).allowedFileTypes().build(),
+            starlarkList,
+            labelConverter);
+
+    assertThat(converted instanceof StarlarkList<?>).isTrue();
+    assertThat((List<Label>) converted).containsExactlyElementsIn(expectedLabels);
+  }
+
+  @Test
+  public void testCopyAndLiftStarlarkDict() throws Exception {
+    Object inputDict = Dict.immutableCopyOf(ImmutableMap.of("a", "b", "c", "d"));
+
+    Object converted =
+        BuildType.copyAndLiftStarlarkValue(
+            "ruleClass",
+            Attribute.attr("attrName", Type.STRING_DICT).build(),
+            inputDict,
+            labelConverter);
+
+    assertThat(converted instanceof Dict).isTrue();
+    assertThat(converted).isEqualTo(inputDict);
+    assertThat(converted).isNotSameInstanceAs(inputDict);
+  }
+
+  @Test
+  public void testCopyAndLiftSelectableStarlarkValue() throws Exception {
+    Object starlarkList = StarlarkList.immutableOf("//a:a1", "//a:a2");
+    Object selectableInput =
+        SelectorList.of(
+            new SelectorValue(
+                ImmutableMap.of(
+                    "//conditions:a",
+                    starlarkList,
+                    BuildType.Selector.DEFAULT_CONDITION_KEY,
+                    starlarkList),
+                ""));
+    StarlarkList<Label> expectedLabels =
+        StarlarkList.immutableOf(Label.create("@//a", "a1"), Label.create("@//a", "a2"));
+
+    Object converted =
+        BuildType.copyAndLiftStarlarkValue(
+            "ruleClass",
+            Attribute.attr("attrName", BuildType.LABEL_LIST).allowedFileTypes().build(),
+            selectableInput,
+            labelConverter);
+
+    assertThat(converted instanceof SelectorList).isTrue();
+    SelectorList selectorList = (SelectorList) converted;
+    assertThat(((SelectorValue) selectorList.getElements().get(0)).getDictionary())
+        .containsExactly(
+            Label.parseCanonical("//conditions:a"),
+            expectedLabels,
+            Label.parseCanonical(Selector.DEFAULT_CONDITION_KEY),
+            expectedLabels);
   }
 
   /**
@@ -504,9 +588,10 @@ public final class BuildTypeTest {
    */
   @Test
   public void testConvertDoesNotAcceptSelectables() throws Exception {
-    Object selectableInput = SelectorList.of(
-        new SelectorValue(
-            ImmutableMap.of("//conditions:a", Arrays.asList("//a:a1", "//a:a2")), ""));
+    Object selectableInput =
+        SelectorList.of(
+            new SelectorValue(
+                ImmutableMap.of("//conditions:a", Arrays.asList("//a:a1", "//a:a2")), ""));
     ConversionException e =
         assertThrows(
             ConversionException.class,
@@ -514,14 +599,13 @@ public final class BuildTypeTest {
     assertThat(e).hasMessageThat().contains("expected value of type 'list(label)'");
   }
 
-  /**
-   * Tests for "reserved" key labels (i.e. not intended to map to actual targets).
-   */
+  /** Test for the default condition key label which is not intended to map to an actual target. */
   @Test
-  public void testReservedKeyLabels() throws Exception {
-    assertThat(BuildType.Selector.isReservedLabel(Label.parseCanonical("//condition:a"))).isFalse();
+  public void testDefaultConditionLabel() throws Exception {
+    assertThat(BuildType.Selector.isDefaultConditionLabel(Label.parseCanonical("//condition:a")))
+        .isFalse();
     assertThat(
-            BuildType.Selector.isReservedLabel(
+            BuildType.Selector.isDefaultConditionLabel(
                 Label.parseCanonical(Selector.DEFAULT_CONDITION_KEY)))
         .isTrue();
   }
@@ -556,6 +640,18 @@ public final class BuildTypeTest {
                     BuildType.LABEL)
                 .isUnconditional())
         .isTrue();
+  }
+
+  @Test
+  public void testSelectorValue_equals() {
+    new EqualsTester()
+        .addEqualityGroup(
+            new SelectorValue(ImmutableMap.of("a", 1, "b", 2), ""),
+            new SelectorValue(ImmutableMap.of("b", 2, "a", 1), ""))
+        .addEqualityGroup(new SelectorValue(ImmutableMap.of("a", 1, "b", 2), "Match failed"))
+        .addEqualityGroup(new SelectorValue(ImmutableMap.of("a", 1, "c", 2), ""))
+        .addEqualityGroup(new SelectorValue(ImmutableMap.of("a", 1, "b", 3), ""))
+        .testEquals();
   }
 
   private static <T> ImmutableList<Label> collectLabels(Type<T> type, T value) {

@@ -37,16 +37,18 @@ public class AndroidSdkRepositoryRule implements RuleDefinition {
   private static final ImmutableMap<String, Label> calculateBindings(Rule rule) {
     String prefix = "@" + rule.getName() + "//:";
     ImmutableMap.Builder<String, Label> builder = ImmutableMap.builder();
-    builder.put("android/sdk", Label.parseAbsoluteUnchecked(prefix + "sdk"));
-    builder.put("android/d8_jar_import", Label.parseAbsoluteUnchecked(prefix + "d8_jar_import"));
-    builder.put("android/dx_jar_import", Label.parseAbsoluteUnchecked(prefix + "dx_jar_import"));
-    builder.put("android_sdk_for_testing", Label.parseAbsoluteUnchecked(prefix + "files"));
-    builder.put("has_androidsdk", Label.parseAbsoluteUnchecked(prefix + "has_androidsdk"));
+    builder.put("android/sdk", Label.parseCanonicalUnchecked(prefix + "sdk"));
+    builder.put("android/d8_jar_import", Label.parseCanonicalUnchecked(prefix + "d8_jar_import"));
+    builder.put("android/dx_jar_import", Label.parseCanonicalUnchecked(prefix + "dx_jar_import"));
+    builder.put("android_sdk_for_testing", Label.parseCanonicalUnchecked(prefix + "files"));
+    builder.put("has_androidsdk", Label.parseCanonicalUnchecked(prefix + "has_androidsdk"));
     return builder.buildOrThrow();
   }
 
   private static final ImmutableList<String> calculateToolchainsToRegister(Rule rule) {
-    return ImmutableList.of(String.format("@%s//:all", rule.getName()));
+    return ImmutableList.of(
+        String.format("@%s//:sdk-toolchain", rule.getName()), // Register the default SDK first.
+        String.format("@%s//:all", rule.getName()));
   }
 
   @Override

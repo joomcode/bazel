@@ -52,11 +52,11 @@ import com.google.devtools.build.lib.skyframe.PackageFunction.GlobbingStrategy;
 import com.google.devtools.build.lib.skyframe.PackageLookupFunction;
 import com.google.devtools.build.lib.skyframe.PackageLookupFunction.CrossRepositoryLabelViolationStrategy;
 import com.google.devtools.build.lib.skyframe.PrecomputedValue;
-import com.google.devtools.build.lib.skyframe.RegisteredExecutionPlatformsFunction;
-import com.google.devtools.build.lib.skyframe.RegisteredToolchainsFunction;
 import com.google.devtools.build.lib.skyframe.SkyFunctions;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.skyframe.WorkspaceFileFunction;
+import com.google.devtools.build.lib.skyframe.toolchains.RegisteredExecutionPlatformsFunction;
+import com.google.devtools.build.lib.skyframe.toolchains.RegisteredToolchainsFunction;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.FileStateKey;
 import com.google.devtools.build.lib.vfs.Path;
@@ -82,6 +82,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 import javax.annotation.Nullable;
 import net.starlark.java.eval.StarlarkSemantics;
 import org.junit.Before;
@@ -103,14 +104,15 @@ public class ExternalPackageHelperTest extends BuildViewTestCase {
   private static final EvaluationContext EVALUATION_OPTIONS =
       EvaluationContext.newBuilder()
           .setKeepGoing(false)
-          .setNumThreads(SkyframeExecutor.DEFAULT_THREAD_COUNT)
+          .setParallelism(SkyframeExecutor.DEFAULT_THREAD_COUNT)
           .setEventHandler(NullEventHandler.INSTANCE)
           .build();
 
   private MemoizingEvaluator evaluator;
 
   @Before
-  public void createEnvironment() {
+  public void createEnvironment() throws Exception {
+    setBuildLanguageOptions("--noenable_bzlmod");
     AnalysisMock analysisMock = AnalysisMock.get();
     AtomicReference<PathPackageLocator> pkgLocator =
         new AtomicReference<>(
@@ -163,12 +165,14 @@ public class ExternalPackageHelperTest extends BuildViewTestCase {
             null,
             null,
             null,
-            /*numPackagesSuccessfullyLoaded=*/ new AtomicInteger(),
+            /* numPackagesSuccessfullyLoaded= */ new AtomicInteger(),
             null,
-            /*packageProgress=*/ null,
+            /* packageProgress= */ null,
             PackageFunction.ActionOnIOExceptionReadingBuildFile.UseOriginalIOException.INSTANCE,
+            /* shouldUseRepoDotBazel= */ true,
             GlobbingStrategy.SKYFRAME_HYBRID,
-            k -> ThreadStateReceiver.NULL_INSTANCE));
+            k -> ThreadStateReceiver.NULL_INSTANCE,
+            new AtomicReference<>()));
     skyFunctions.put(
         SkyFunctions.EXTERNAL_PACKAGE,
         new ExternalPackageFunction(BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER));
@@ -185,7 +189,7 @@ public class ExternalPackageHelperTest extends BuildViewTestCase {
     RecordingDifferencer differencer = new SequencedRecordingDifferencer();
     evaluator = new InMemoryMemoizingEvaluator(skyFunctions, differencer);
     PrecomputedValue.PATH_PACKAGE_LOCATOR.set(differencer, pkgLocator.get());
-    PrecomputedValue.STARLARK_SEMANTICS.set(differencer, StarlarkSemantics.DEFAULT);
+    PrecomputedValue.STARLARK_SEMANTICS.set(differencer, getStarlarkSemantics());
     RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE.set(
         differencer, Optional.empty());
   }
@@ -409,13 +413,21 @@ public class ExternalPackageHelperTest extends BuildViewTestCase {
     @Override
     public SkyValue compute(SkyKey skyKey, Environment env)
         throws SkyFunctionException, InterruptedException {
-      List<TargetPattern> registeredToolchains =
-          RegisteredToolchainsFunction.getWorkspaceToolchains(env);
-      if (registeredToolchains == null) {
+      ImmutableList<TargetPattern> userRegisteredToolchains =
+          RegisteredToolchainsFunction.getWorkspaceToolchains(
+              StarlarkSemantics.DEFAULT, env, /* userRegistered= */ true);
+      if (userRegisteredToolchains == null) {
+        return null;
+      }
+      ImmutableList<TargetPattern> workspaceSuffixRegisteredToolchains =
+          RegisteredToolchainsFunction.getWorkspaceToolchains(
+              StarlarkSemantics.DEFAULT, env, /* userRegistered= */ false);
+      if (workspaceSuffixRegisteredToolchains == null) {
         return null;
       }
       return GetRegisteredToolchainsValue.create(
-          registeredToolchains.stream()
+          Stream.concat(
+                  userRegisteredToolchains.stream(), workspaceSuffixRegisteredToolchains.stream())
               .map(TargetPattern::getOriginalPattern)
               .collect(toImmutableList()));
     }
@@ -442,7 +454,8 @@ public class ExternalPackageHelperTest extends BuildViewTestCase {
     public SkyValue compute(SkyKey skyKey, Environment env)
         throws SkyFunctionException, InterruptedException {
       List<TargetPattern> registeredExecutionPlatforms =
-          RegisteredExecutionPlatformsFunction.getWorkspaceExecutionPlatforms(env);
+          RegisteredExecutionPlatformsFunction.getWorkspaceExecutionPlatforms(
+              StarlarkSemantics.DEFAULT, env);
       if (registeredExecutionPlatforms == null) {
         return null;
       }

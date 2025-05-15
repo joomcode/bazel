@@ -24,7 +24,6 @@ import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.concurrent.ExecutorUtil;
 import com.google.devtools.build.lib.testutil.TestRunnableWrapper;
 import com.google.devtools.build.lib.testutil.TestUtils;
-import com.google.devtools.build.lib.util.GroupedList.GroupedListHelper;
 import com.google.devtools.build.skyframe.GraphTester.StringValue;
 import com.google.devtools.build.skyframe.NodeEntry.DependencyState;
 import com.google.devtools.build.skyframe.NodeEntry.DirtyType;
@@ -111,7 +110,7 @@ public abstract class GraphTest {
   }
 
   protected static SkyKey key(String name) {
-    return GraphTester.toSkyKey(name);
+    return GraphTester.skyKey(name);
   }
 
   @Test
@@ -127,6 +126,14 @@ public abstract class GraphTest {
     assertThat(dogNode).isNotNull();
     assertThat(batch.get(cat)).isSameInstanceAs(catNode);
     assertThat(batch.get(dog)).isSameInstanceAs(dogNode);
+  }
+
+  @Test
+  public void createIfAbsentBatch_interveningCallToRemove() throws Exception {
+    SkyKey key = key("key");
+    NodeBatch batch = graph.createIfAbsentBatch(null, Reason.OTHER, ImmutableList.of(key));
+    graph.remove(key);
+    assertThat(batch.get(key)).isNotNull();
   }
 
   @Test
@@ -253,7 +260,9 @@ public abstract class GraphTest {
               waitForAddedRdep.countDown();
               waitForSetValue.await(TestUtils.WAIT_TIMEOUT_SECONDS, SECONDS);
               for (int k = chunkSize; k <= numIterations; k++) {
-                entry.removeReverseDep(key("rdep" + j));
+                if (shouldTestIncrementality()) {
+                  entry.removeReverseDep(key("rdep" + j));
+                }
                 entry.addReverseDepAndCheckIfDone(key("rdep" + j));
                 if (shouldTestIncrementality()) {
                   entry.getReverseDepsForDoneEntry();
@@ -432,7 +441,7 @@ public abstract class GraphTest {
               // Make some changes, like adding a dep and rdep.
               entry.addReverseDepAndCheckIfDone(key("rdep"));
               entry.markRebuilding();
-              addTemporaryDirectDep(entry, dep);
+              entry.addSingletonTemporaryDirectDep(dep);
               Version nextVersion = getNextVersion(startingVersion);
               entry.signalDep(nextVersion, dep);
 
@@ -517,13 +526,7 @@ public abstract class GraphTest {
     }
   }
 
-  private static DependencyState startEvaluation(NodeEntry entry) throws InterruptedException {
+  protected static DependencyState startEvaluation(NodeEntry entry) throws InterruptedException {
     return entry.addReverseDepAndCheckIfDone(null);
-  }
-
-  private static void addTemporaryDirectDep(NodeEntry entry, SkyKey key) {
-    GroupedListHelper<SkyKey> helper = new GroupedListHelper<>();
-    helper.add(key);
-    entry.addTemporaryDirectDeps(helper);
   }
 }

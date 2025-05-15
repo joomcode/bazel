@@ -82,7 +82,7 @@ public class TestRuleClassProvider {
     builder.addRuleDefinition(new TestingDummyRule());
     builder.addRuleDefinition(new MockToolchainRule());
     if (clearSuffix) {
-      builder.clearWorkspaceFileSuffixForTesting();
+      builder.clearWorkspaceFileSuffixForTesting().clearWorkspaceFilePrefixForTesting();
     }
     return builder.build();
   }
@@ -139,6 +139,12 @@ public class TestRuleClassProvider {
     protected boolean checkVisibilityForExperimental(RuleContext.Builder context) {
       // It does not matter whether we return true or false here if packageUnderExperimental always
       // returns false.
+      return true;
+    }
+
+    @Override
+    protected boolean checkVisibilityForToolchains(
+        RuleContext.Builder context, Label prerequisite) {
       return true;
     }
 
@@ -220,7 +226,7 @@ public class TestRuleClassProvider {
           .requiresConfigurationFragments(PlatformConfiguration.class)
           .addToolchainTypes(
               ToolchainTypeRequirement.create(
-                  Label.parseAbsoluteUnchecked("//toolchain:test_toolchain")))
+                  Label.parseCanonicalUnchecked("//toolchain:test_toolchain")))
           .build();
     }
 

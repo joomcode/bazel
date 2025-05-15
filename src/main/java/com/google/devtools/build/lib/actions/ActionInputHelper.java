@@ -21,7 +21,10 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 
 /** Helper utility to create ActionInput instances. */
 public final class ActionInputHelper {
@@ -37,6 +40,11 @@ public final class ActionInputHelper {
     // TODO(lberki): Plumb this flag from InputTree.build() somehow.
     @Override
     public boolean isSymlink() {
+      return false;
+    }
+
+    @Override
+    public boolean isDirectory() {
       return false;
     }
 
@@ -117,16 +125,24 @@ public final class ActionInputHelper {
       ArtifactExpander artifactExpander,
       boolean keepEmptyTreeArtifacts) {
     List<ActionInput> result = new ArrayList<>();
-    List<Artifact> containedArtifacts = new ArrayList<>();
+    Set<Artifact> emptyTreeArtifacts = new TreeSet<>();
+    Set<Artifact> treeFileArtifactParents = new HashSet<>();
     for (ActionInput input : inputs.toList()) {
-      if (!(input instanceof Artifact)) {
+      if (input instanceof Artifact) {
+        Artifact inputArtifact = (Artifact) input;
+        Artifact.addExpandedArtifact(inputArtifact, result, artifactExpander, emptyTreeArtifacts);
+        if (inputArtifact.isChildOfDeclaredDirectory()) {
+          treeFileArtifactParents.add(inputArtifact.getParent());
+        }
+      } else {
         result.add(input);
-        continue;
       }
-      containedArtifacts.add((Artifact) input);
     }
-    Artifact.addExpandedArtifacts(
-        containedArtifacts, result, artifactExpander, keepEmptyTreeArtifacts);
+
+    if (keepEmptyTreeArtifacts) {
+      emptyTreeArtifacts.removeAll(treeFileArtifactParents);
+      result.addAll(emptyTreeArtifacts);
+    }
     return result;
   }
 

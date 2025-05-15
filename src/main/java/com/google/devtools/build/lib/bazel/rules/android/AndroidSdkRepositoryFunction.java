@@ -19,16 +19,20 @@ import static com.google.common.collect.Streams.stream;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.google.devtools.build.lib.actions.FileValue;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.bugreport.BugReport;
+import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.io.InconsistentFilesystemException;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.Type;
+import com.google.devtools.build.lib.rules.repository.RepoRecordedInput;
 import com.google.devtools.build.lib.rules.repository.RepositoryDirectoryValue;
 import com.google.devtools.build.lib.rules.repository.WorkspaceAttributeMapper;
 import com.google.devtools.build.lib.skyframe.DirectoryListingValue;
@@ -36,6 +40,7 @@ import com.google.devtools.build.lib.skyframe.Dirents;
 import com.google.devtools.build.lib.util.ResourceFileLoader;
 import com.google.devtools.build.lib.vfs.Dirent;
 import com.google.devtools.build.lib.vfs.FileSystem;
+import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
@@ -49,6 +54,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import javax.annotation.Nullable;
 import net.starlark.java.eval.EvalException;
@@ -163,7 +169,7 @@ public class AndroidSdkRepositoryFunction extends AndroidRepositoryFunction {
   private static final PathFragment SYSTEM_IMAGES_DIR = PathFragment.create("system-images");
   private static final AndroidRevision MIN_BUILD_TOOLS_REVISION = AndroidRevision.parse("30.0.0");
   private static final String PATH_ENV_VAR = "ANDROID_HOME";
-  private static final ImmutableList<String> PATH_ENV_VAR_AS_LIST = ImmutableList.of(PATH_ENV_VAR);
+  private static final ImmutableSet<String> PATH_ENV_VAR_AS_SET = ImmutableSet.of(PATH_ENV_VAR);
   private static final ImmutableList<String> LOCAL_MAVEN_REPOSITORIES =
       ImmutableList.of(
           "extras/android/m2repository", "extras/google/m2repository", "extras/m2repository");
@@ -174,47 +180,58 @@ public class AndroidSdkRepositoryFunction extends AndroidRepositoryFunction {
   }
 
   @Override
-  public boolean verifyMarkerData(Rule rule, Map<String, String> markerData, Environment env)
+  public boolean verifyRecordedInputs(
+      Rule rule,
+      BlazeDirectories directories,
+      Map<RepoRecordedInput, String> recordedInputValues,
+      Environment env)
       throws InterruptedException {
     WorkspaceAttributeMapper attributes = WorkspaceAttributeMapper.of(rule);
     if (attributes.isAttributeValueExplicitlySpecified("path")) {
       return true;
     }
-    return super.verifyEnvironMarkerData(markerData, env, PATH_ENV_VAR_AS_LIST);
+    return super.verifyRecordedInputs(rule, directories, recordedInputValues, env);
   }
 
   @Override
   @Nullable
-  public RepositoryDirectoryValue.Builder fetch(
+  public FetchResult fetch(
       Rule rule,
       final Path outputDirectory,
       BlazeDirectories directories,
       Environment env,
-      Map<String, String> markerData,
       SkyKey key)
       throws RepositoryFunctionException, InterruptedException {
-    Map<String, String> environ =
-        declareEnvironmentDependencies(markerData, env, PATH_ENV_VAR_AS_LIST);
+    ensureNativeRepoRuleEnabled(rule, env, "https://github.com/bazelbuild/rules_android");
+    ImmutableMap<String, Optional<String>> environ = getEnvVarValues(env, PATH_ENV_VAR_AS_SET);
     if (environ == null) {
       return null;
     }
-    prepareLocalRepositorySymlinkTree(rule, outputDirectory);
+    try {
+      outputDirectory.createDirectoryAndParents();
+      FileSystemUtils.createEmptyFile(outputDirectory.getRelative(LabelConstants.REPO_FILE_NAME));
+    } catch (IOException e) {
+      throw new RepositoryFunctionException(e, Transience.TRANSIENT);
+    }
     WorkspaceAttributeMapper attributes = WorkspaceAttributeMapper.of(rule);
     FileSystem fs = directories.getOutputBase().getFileSystem();
     Path androidSdkPath;
-    String userDefinedPath = null;
+    String userDefinedPath;
     if (attributes.isAttributeValueExplicitlySpecified("path")) {
       userDefinedPath = getPathAttr(rule);
       androidSdkPath = fs.getPath(getTargetPath(userDefinedPath, directories.getWorkspace()));
-    } else if (environ.get(PATH_ENV_VAR) != null) {
-      userDefinedPath = environ.get(PATH_ENV_VAR);
+    } else if (environ.getOrDefault(PATH_ENV_VAR, Optional.empty()).isPresent()) {
+      userDefinedPath = environ.get(PATH_ENV_VAR).get();
+      Path workspace = directories.getWorkspace();
       androidSdkPath =
-          fs.getPath(getAndroidHomeEnvironmentVar(directories.getWorkspace(), environ));
+          fs.getPath(workspace.getRelative(PathFragment.create(userDefinedPath)).asFragment());
     } else {
       // Write an empty BUILD file that declares errors when referred to.
       String buildFile = getStringResource("android_sdk_repository_empty_template.txt");
       writeBuildFile(outputDirectory, buildFile);
-      return RepositoryDirectoryValue.builder().setPath(outputDirectory);
+      return new FetchResult(
+          RepositoryDirectoryValue.builder().setPath(outputDirectory),
+          Maps.transformValues(RepoRecordedInput.EnvVar.wrap(environ), v -> v.orElse(null)));
     }
 
     if (!symlinkLocalRepositoryContents(outputDirectory, androidSdkPath, userDefinedPath)) {
@@ -341,17 +358,14 @@ public class AndroidSdkRepositoryFunction extends AndroidRepositoryFunction {
     }
 
     writeBuildFile(outputDirectory, buildFile);
-    return RepositoryDirectoryValue.builder().setPath(outputDirectory);
+    return new FetchResult(
+        RepositoryDirectoryValue.builder().setPath(outputDirectory),
+        Maps.transformValues(RepoRecordedInput.EnvVar.wrap(environ), v -> v.orElse(null)));
   }
 
   @Override
   public Class<? extends RuleDefinition> getRuleDefinition() {
     return AndroidSdkRepositoryRule.class;
-  }
-
-  private static PathFragment getAndroidHomeEnvironmentVar(
-      Path workspace, Map<String, String> env) {
-    return workspace.getRelative(PathFragment.create(env.get(PATH_ENV_VAR))).asFragment();
   }
 
   private static String getStringResource(String name) {

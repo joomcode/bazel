@@ -3,20 +3,27 @@ Book: /_book.yaml
 
 # Deploying Rules
 
+{% include "_buttons.html" %}
+
 This page is for rule writers who are planning to make their rules available
 to others.
+
+We recommend you start a new ruleset from the template repository:
+https://github.com/bazel-contrib/rules-template
+That template follows the recommendations below, and includes API documentation generation
+and sets up a CI/CD pipeline to make it trivial to distribute your ruleset.
 
 ## Hosting and naming rules
 
 New rules should go into their own GitHub repository under your organization.
-Contact the [bazel-dev mailing list](https://groups.google.com/forum/#!forum/bazel-dev)
+Start a thread on [GitHub](https://github.com/bazelbuild/bazel/discussions)
 if you feel like your rules belong in the [bazelbuild](https://github.com/bazelbuild)
 organization.
 
 Repository names for Bazel rules are standardized on the following format:
 `$ORGANIZATION/rules_$NAME`.
 See [examples on GitHub](https://github.com/search?q=rules+bazel&type=Repositories).
-For consistency, you must follow this same format when publishing your Bazel rules.
+For consistency, you should follow this same format when publishing your Bazel rules.
 
 Make sure to use a descriptive GitHub repository description and `README.md`
 title, example:
@@ -28,8 +35,8 @@ title, example:
 (note the link to https://bazel.build which will guide users who are unfamiliar
 with Bazel to the right place)
 
-Rules can be grouped either by language (such as Scala) or platform
-(such as Android).
+Rules can be grouped either by language (such as Scala), runtime platform
+(such as Android), or framework (such as Spring).
 
 ## Repository content
 
@@ -69,8 +76,8 @@ In the project's `WORKSPACE`, you should define the name that users will use
 to reference your rules. If your rules belong to the
 [bazelbuild](https://github.com/bazelbuild) organization, you must use
 `rules_<lang>` (such as `rules_mockascript`). Otherwise, you should name your
-repository `<org>_rules_<lang>` (such as `build_stack_rules_proto`). Please contact
-[bazel-dev mailing list](https://groups.google.com/forum/#!forum/bazel-dev)
+repository `<org>_rules_<lang>` (such as `build_stack_rules_proto`). Please
+start a thread on [GitHub](https://github.com/bazelbuild/bazel/discussions)
 if you feel like your rules should follow the convention for rules in the
 [bazelbuild](https://github.com/bazelbuild) organization.
 
@@ -127,7 +134,7 @@ For `rules_mockascript` that means there will be a directory named
 ### Constraints
 
 If your rule defines
-[toolchain](/docs/toolchains) rules,
+[toolchain](/extending/toolchains) rules,
 it's possible that you'll need to define custom `constraint_setting`s and/or
 `constraint_value`s. Put these into a `//<LANG>/constraints` package. Your
 directory structure will look like this:
@@ -230,28 +237,11 @@ can either be in the standard location for the language the rules are for or a
 It is useful to users to have an `examples/` directory that shows users a couple
 of basic ways that the rules can be used.
 
-## Testing
+## CI/CD
 
-Set up Travis as described in their [getting started
-docs](https://docs.travis-ci.com/user/getting-started/). Then add a
-`.travis.yml` file to your repository with the following content:
-
-```
-dist: xenial  # Ubuntu 16.04
-
-# On trusty (or later) images, the Bazel apt repository can be used.
-addons:
-  apt:
-    sources:
-    - sourceline: 'deb [arch=amd64] http://storage.googleapis.com/bazel-apt stable jdk1.8'
-      key_url: 'https://bazel.build/bazel-release.pub.gpg'
-    packages:
-    - bazel
-
-script:
-  - bazel build //...
-  - bazel test //...
-```
+Many rulesets use GitHub Actions. See the configuration used in the [rules-template](https://github.com/bazel-contrib/rules-template/tree/main/.github/workflows) repo, which are simplified using a "reusable workflow" hosted in the bazel-contrib
+org. `ci.yaml` runs tests on each PR and `main` comit, and `release.yaml` runs anytime you push a tag to the repository.
+See comments in the rules-template repo for more information.
 
 If your repository is under the [bazelbuild organization](https://github.com/bazelbuild),
 you can [ask to add](https://github.com/bazelbuild/continuous-integration/issues/new?template=adding-your-project-to-bazel-ci.md&title=Request+to+add+new+project+%5BPROJECT_NAME%5D&labels=new-project)
@@ -262,6 +252,10 @@ it to [ci.bazel.build](http://ci.bazel.build).
 See the [Stardoc documentation](https://github.com/bazelbuild/stardoc) for
 instructions on how to comment your rules so that documentation can be generated
 automatically.
+
+The [rules-template docs/ folder](https://github.com/bazel-contrib/rules-template/tree/main/docs)
+shows a simple way to ensure the Markdown content in the `docs/` folder is always up-to-date
+as Starlark files are updated.
 
 ## FAQs
 

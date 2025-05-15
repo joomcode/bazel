@@ -17,18 +17,10 @@ package com.google.devtools.build.lib.rules;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.devtools.build.lib.bazel.bzlmod.BzlmodTestUtil.createModuleKey;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
-import com.google.devtools.build.lib.bazel.bzlmod.BazelModuleResolutionFunction;
-import com.google.devtools.build.lib.bazel.bzlmod.FakeRegistry;
-import com.google.devtools.build.lib.bazel.bzlmod.ModuleFileFunction;
-import com.google.devtools.build.lib.bazel.repository.RepositoryOptions.CheckDirectDepsMode;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.skyframe.PrecomputedValue;
-import com.google.devtools.build.lib.skyframe.PrecomputedValue.Injected;
-import java.io.IOException;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -36,24 +28,6 @@ import org.junit.runners.JUnit4;
 /** Tests for {@link LabelBuildSettings} rules. */
 @RunWith(JUnit4.class)
 public class LabelBuildSettingTest extends BuildViewTestCase {
-  private FakeRegistry registry;
-
-  @Override
-  protected ImmutableList<Injected> extraPrecomputedValues() {
-    try {
-      registry =
-          FakeRegistry.DEFAULT_FACTORY.newFakeRegistry(scratch.dir("modules").getPathString());
-    } catch (IOException e) {
-      throw new IllegalStateException(e);
-    }
-    return ImmutableList.of(
-        PrecomputedValue.injected(
-            ModuleFileFunction.REGISTRIES, ImmutableList.of(registry.getUrl())),
-        PrecomputedValue.injected(ModuleFileFunction.IGNORE_DEV_DEPS, false),
-        PrecomputedValue.injected(ModuleFileFunction.MODULE_OVERRIDES, ImmutableMap.of()),
-        PrecomputedValue.injected(
-            BazelModuleResolutionFunction.CHECK_DIRECT_DEPENDENCIES, CheckDirectDepsMode.WARNING));
-  }
 
   private void writeRulesBzl(String type) throws Exception {
     scratch.file(
@@ -136,10 +110,39 @@ public class LabelBuildSettingTest extends BuildViewTestCase {
 
     useConfiguration(
         ImmutableMap.of(
-            "//test:my_label_flag", Label.parseAbsoluteUnchecked("//test:command_line")));
+            "//test:my_label_flag", Label.parseCanonicalUnchecked("//test:command_line")));
 
     ConfiguredTarget b = getConfiguredTarget("//test:my_rule");
     assertThat(b.get("value")).isEqualTo("command_line_value");
+  }
+
+  @Test
+  public void withSelectThroughAlias() throws Exception {
+    writeRulesBzl("flag");
+    scratch.file(
+        "test/BUILD",
+        "load('//test:rules.bzl', 'my_rule', 'simple_rule')",
+        "simple_rule(name = 'default', value = 'default_value')",
+        "simple_rule(name = 'command_line', value = 'command_line_value')",
+        "label_flag(name = 'my_label_flag', build_setting_default = ':default')",
+        "alias(name = 'my_label_flag_alias', actual = ':my_label_flag')",
+        "config_setting(",
+        "    name = 'is_default_label',",
+        "    flag_values = {':my_label_flag_alias': '//test:default'}",
+        ")",
+        "simple_rule(name = 'selector', value = select({':is_default_label': 'valid'}))");
+
+    useConfiguration();
+    getConfiguredTarget("//test:selector");
+    assertNoEvents();
+
+    reporter.removeHandler(failFastHandler);
+    useConfiguration(
+        ImmutableMap.of(
+            "//test:my_label_flag", Label.parseCanonicalUnchecked("//test:command_line")));
+    getConfiguredTarget("//test:selector");
+    assertContainsEvent(
+        "configurable attribute \"value\" in //test:selector doesn't match this configuration");
   }
 
   @Test
@@ -164,7 +167,7 @@ public class LabelBuildSettingTest extends BuildViewTestCase {
     reporter.removeHandler(failFastHandler);
     useConfiguration(
         ImmutableMap.of(
-            "//test:my_label_flag", Label.parseAbsoluteUnchecked("//test:command_line")));
+            "//test:my_label_flag", Label.parseCanonicalUnchecked("//test:command_line")));
     getConfiguredTarget("//test:selector");
     assertContainsEvent(
         "configurable attribute \"value\" in //test:selector doesn't match this configuration");
@@ -192,7 +195,7 @@ public class LabelBuildSettingTest extends BuildViewTestCase {
     reporter.removeHandler(failFastHandler);
     useConfiguration(
         ImmutableMap.of(
-            "//test:my_label_flag", Label.parseAbsoluteUnchecked("//test:command_line")));
+            "//test:my_label_flag", Label.parseCanonicalUnchecked("//test:command_line")));
     getConfiguredTarget("//test:selector");
     assertContainsEvent(
         "configurable attribute \"value\" in //test:selector doesn't match this configuration");
@@ -277,12 +280,10 @@ public class LabelBuildSettingTest extends BuildViewTestCase {
 
   @Test
   public void transitionOutput_otherRepo() throws Exception {
-    setBuildLanguageOptions("--enable_bzlmod");
-
     scratch.overwriteFile("MODULE.bazel", "bazel_dep(name='foo',version='1.0')");
     registry.addModule(createModuleKey("foo", "1.0"), "module(name='foo', version='1.0')");
-    scratch.file("modules/foo~1.0/WORKSPACE");
-    scratch.file("modules/foo~1.0/BUILD", "filegroup(name='other_rule')");
+    scratch.file("modules/foo~v1.0/WORKSPACE");
+    scratch.file("modules/foo~v1.0/BUILD", "filegroup(name='other_rule')");
 
     scratch.overwriteFile(
         "tools/allowlists/function_transition_allowlist/BUILD",
@@ -328,7 +329,51 @@ public class LabelBuildSettingTest extends BuildViewTestCase {
         "label_flag(name = 'my_flag2', build_setting_default = ':first_rule')",
         "filegroup(name = 'first_rule')",
         "rule_with_transition(name = 'buildme')");
+
+    invalidatePackages();
+
     assertThat(getConfiguredTarget("//test:buildme")).isNotNull();
     assertNoEvents();
+  }
+
+  @Test
+  public void testInvisibleRepoInLabelResultsInEarlyError() throws Exception {
+    scratch.file(
+        "test/defs.bzl",
+        "def _setting_impl(ctx):",
+        "  return []",
+        "string_flag = rule(",
+        "  implementation = _setting_impl,",
+        "  build_setting = config.string(flag=True),",
+        ")",
+        "def _transition_impl(settings, attr):",
+        "  return {'//test:formation': 'mesa'}",
+        "formation_transition = transition(",
+        "  implementation = _transition_impl,",
+        "  inputs = ['@foobar//test:formation'],", // invalid repo name
+        "  outputs = ['//test:formation'],",
+        ")",
+        "def _impl(ctx):",
+        "  return []",
+        "state = rule(",
+        "  implementation = _impl,",
+        "  cfg = formation_transition,",
+        "  attrs = {",
+        "    '_allowlist_function_transition': attr.label(",
+        "        default = '//tools/allowlists/function_transition_allowlist',",
+        "    ),",
+        "  })");
+    scratch.file(
+        "test/BUILD",
+        "load('//test:defs.bzl', 'state', 'string_flag')",
+        "state(name = 'arizona')",
+        "string_flag(name = 'formation', build_setting_default = 'canyon')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:arizona");
+
+    assertContainsEvent(
+        "Error in transition: invalid transition input '@@[unknown repo 'foobar' requested from @@]"
+            + "//test:formation': no repo visible as @foobar from main repository");
   }
 }

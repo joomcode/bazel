@@ -84,6 +84,8 @@ fi
 function test_python_binary_empty_files_in_runfiles_are_regular_files() {
   mkdir -p test/mypackage
   cat > test/BUILD <<'EOF'
+load("@rules_python//python:py_test.bzl", "py_test")
+
 py_test(
     name = "a",
     srcs = [
@@ -128,6 +130,8 @@ function test_building_transitive_py_binary_runfiles_trees() {
   touch main.py script.sh
   chmod u+x script.sh
   cat > BUILD <<'EOF'
+load("@rules_python//python:py_binary.bzl", "py_binary")
+
 py_binary(
     name = 'py-tool',
     srcs = ['main.py'],
@@ -144,9 +148,7 @@ EOF
   # happens is Google has stamping enabled by default, which causes the
   # Starlark rule implementation to run an action, which then tries to run
   # remotely, but network access is disabled by default, so it times out.
-  bazel build --experimental_build_transitive_python_runfiles --nostamp :sh-tool
-  [ -d "bazel-bin/py-tool${EXE_EXT}.runfiles" ] || fail "py_binary runfiles tree not built"
-  bazel clean
+
   bazel build --noexperimental_build_transitive_python_runfiles --nostamp :sh-tool
   [ ! -e "bazel-bin/py-tool${EXE_EXT}.runfiles" ] || fail "py_binary runfiles tree built"
 }

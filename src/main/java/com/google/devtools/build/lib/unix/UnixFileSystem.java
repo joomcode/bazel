@@ -34,7 +34,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import javax.annotation.Nullable;
@@ -120,7 +120,8 @@ public class UnixFileSystem extends AbstractFileSystemWithCustomStat {
       return status.getInodeNumber();
     }
 
-    int getPermissions() {
+    @Override
+    public int getPermissions() {
       return status.getPermissions();
     }
 
@@ -140,11 +141,7 @@ public class UnixFileSystem extends AbstractFileSystemWithCustomStat {
     } finally {
       profiler.logSimpleTask(startTime, ProfilerTask.VFS_DIR, name);
     }
-    Collection<String> result = new ArrayList<>(entries.length);
-    for (String entry : entries) {
-      result.add(entry);
-    }
-    return result;
+    return Arrays.asList(entries);
   }
 
   @Override
@@ -335,9 +332,10 @@ public class UnixFileSystem extends AbstractFileSystemWithCustomStat {
 
   @Override
   public boolean createDirectory(PathFragment path) throws IOException {
+    // Use 0777 so that the permissions can be overridden by umask(2).
     // Note: UNIX mkdir(2), FilesystemUtils.mkdir() and createDirectory all
     // have different ways of representing failure!
-    if (NativePosixFiles.mkdir(path.toString(), 0777)) {
+    if (NativePosixFiles.mkdir(path.toString(), 0755)) {
       return true; // successfully created
     }
 
@@ -356,7 +354,8 @@ public class UnixFileSystem extends AbstractFileSystemWithCustomStat {
 
   @Override
   public void createDirectoryAndParents(PathFragment path) throws IOException {
-    NativePosixFiles.mkdirs(path.toString(), 0777);
+    // Use 0777 so that the permissions can be overridden by umask(2).
+    NativePosixFiles.mkdirs(path.toString(), 0755);
   }
 
   @Override
@@ -408,13 +407,7 @@ public class UnixFileSystem extends AbstractFileSystemWithCustomStat {
 
   @Override
   public void setLastModifiedTime(PathFragment path, long newTime) throws IOException {
-    if (newTime == Path.NOW_SENTINEL_TIME) {
-      NativePosixFiles.utime(path.toString(), true, 0);
-    } else {
-      // newTime > MAX_INT => -ve unixTime
-      int unixTime = (int) (newTime / 1000);
-      NativePosixFiles.utime(path.toString(), false, unixTime);
-    }
+    NativePosixFiles.utimensat(path.toString(), newTime == Path.NOW_SENTINEL_TIME, newTime);
   }
 
   @Override

@@ -13,6 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.java;
 
+import static com.google.devtools.build.lib.rules.java.JavaStarlarkCommon.checkPrivateAccess;
+
 import com.google.auto.value.AutoValue;
 import com.google.common.base.Ascii;
 import com.google.common.base.Optional;
@@ -26,10 +28,15 @@ import com.google.devtools.build.lib.analysis.config.InvalidConfigurationExcepti
 import com.google.devtools.build.lib.analysis.config.RequiresOptions;
 import com.google.devtools.build.lib.analysis.starlark.annotations.StarlarkConfigurationField;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.packages.BuiltinRestriction;
 import com.google.devtools.build.lib.starlarkbuildapi.java.JavaConfigurationApi;
 import java.util.Map;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.StarlarkThread;
 
 /** A java compiler configuration containing the flags required for compilation. */
 @Immutable
@@ -72,7 +79,7 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     ERROR
   }
 
-  private final ImmutableList<String> commandLineJavacFlags;
+  private final NestedSet<String> commandLineJavacFlags;
   private final Label javaLauncherLabel;
   private final boolean useIjars;
   private final boolean useHeaderCompilation;
@@ -81,7 +88,6 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
   private final boolean isDisallowStrictDepsForJpl;
   private final OneVersionEnforcementLevel enforceOneVersion;
   private final boolean enforceOneVersionOnJavaTests;
-  private final boolean enforceOneVersionValidationAction;
   private final ImportDepsCheckingLevel importDepsCheckingLevel;
   private final boolean allowRuntimeDepsOnNeverLink;
   private final JavaClasspathMode javaClasspath;
@@ -90,10 +96,9 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
   private final StrictDepsMode strictJavaDeps;
   private final String fixDepsTool;
   private final Label proguardBinary;
-  private final ImmutableList<Label> extraProguardSpecs;
   private final NamedLabel bytecodeOptimizer;
   private final boolean runLocalJavaOptimizations;
-  private final ImmutableList<Label> localJavaOptimizationConfiguration;
+  private final Label localJavaOptimizationConfiguration;
   private final boolean splitBytecodeOptimizationPass;
   private final int bytecodeOptimizationPassActions;
   private final boolean enforceProguardFileExtension;
@@ -106,9 +111,10 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
   private final boolean disallowResourceJars;
   private final boolean experimentalTurbineAnnotationProcessing;
   private final boolean experimentalEnableJspecify;
-  private final boolean requireJavaPluginInfo;
   private final boolean multiReleaseDeployJars;
   private final boolean disallowJavaImportExports;
+  private final boolean disallowJavaImportEmptyJars;
+  private final boolean autoCreateDeployJarForJavaTests;
 
   // TODO(dmarting): remove once we have a proper solution for #2539
   private final boolean useLegacyBazelJavaTest;
@@ -116,7 +122,7 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
   public JavaConfiguration(BuildOptions buildOptions) throws InvalidConfigurationException {
     JavaOptions javaOptions = buildOptions.get(JavaOptions.class);
     this.commandLineJavacFlags =
-        ImmutableList.copyOf(JavaHelper.tokenizeJavaOptions(javaOptions.javacOpts));
+        JavaHelper.detokenizeJavaOptions(JavaHelper.tokenizeJavaOptions(javaOptions.javacOpts));
     this.javaLauncherLabel = javaOptions.javaLauncher;
     this.useIjars = javaOptions.useIjars;
     this.useHeaderCompilation = javaOptions.headerCompilation;
@@ -128,10 +134,8 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     this.strictJavaDeps = javaOptions.strictJavaDeps;
     this.fixDepsTool = javaOptions.fixDepsTool;
     this.proguardBinary = javaOptions.proguard;
-    this.extraProguardSpecs = ImmutableList.copyOf(javaOptions.extraProguardSpecs);
     this.runLocalJavaOptimizations = javaOptions.runLocalJavaOptimizations;
-    this.localJavaOptimizationConfiguration =
-        ImmutableList.copyOf(javaOptions.localJavaOptimizationConfiguration);
+    this.localJavaOptimizationConfiguration = javaOptions.localJavaOptimizationConfiguration;
     this.splitBytecodeOptimizationPass = javaOptions.splitBytecodeOptimizationPass;
     this.bytecodeOptimizationPassActions = javaOptions.bytecodeOptimizationPassActions;
     this.enforceProguardFileExtension = javaOptions.enforceProguardFileExtension;
@@ -140,7 +144,6 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     this.isDisallowStrictDepsForJpl = javaOptions.isDisallowStrictDepsForJpl;
     this.enforceOneVersion = javaOptions.enforceOneVersion;
     this.enforceOneVersionOnJavaTests = javaOptions.enforceOneVersionOnJavaTests;
-    this.enforceOneVersionValidationAction = javaOptions.enforceOneVersionValidationAction;
     this.importDepsCheckingLevel = javaOptions.importDepsCheckingLevel;
     this.allowRuntimeDepsOnNeverLink = javaOptions.allowRuntimeDepsOnNeverLink;
     this.explicitJavaTestDeps = javaOptions.explicitJavaTestDeps;
@@ -149,15 +152,15 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     this.addTestSupportToCompileTimeDeps = javaOptions.addTestSupportToCompileTimeDeps;
     this.runAndroidLint = javaOptions.runAndroidLint;
     this.limitAndroidLintToAndroidCompatible = javaOptions.limitAndroidLintToAndroidCompatible;
-    this.requireJavaPluginInfo = javaOptions.requireJavaPluginInfo;
     this.multiReleaseDeployJars = javaOptions.multiReleaseDeployJars;
     this.disallowJavaImportExports = javaOptions.disallowJavaImportExports;
-
+    this.disallowJavaImportEmptyJars = javaOptions.disallowJavaImportEmptyJars;
+    this.autoCreateDeployJarForJavaTests = javaOptions.autoCreateDeployJarForJavaTests;
     Map<String, Label> optimizers = javaOptions.bytecodeOptimizers;
-    if (optimizers.size() > 1) {
+    if (optimizers.size() != 1) {
       throw new InvalidConfigurationException(
           String.format(
-              "--experimental_bytecode_optimizers can only accept up to one mapping, but %d"
+              "--experimental_bytecode_optimizers can only accept exactly one mapping, but %d"
                   + " mappings were provided.",
               optimizers.size()));
     }
@@ -216,11 +219,22 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     }
   }
 
+  public NestedSet<String> getDefaultJavacFlags() {
+    return commandLineJavacFlags;
+  }
+
   @Override
   // TODO(bazel-team): this is the command-line passed options, we should remove from Starlark
   // probably.
-  public ImmutableList<String> getDefaultJavacFlags() {
-    return commandLineJavacFlags;
+  public ImmutableList<String> getDefaultJavacFlagsForStarlarkAsList() {
+    return JavaHelper.tokenizeJavaOptions(commandLineJavacFlags);
+  }
+
+  @Override
+  // TODO(bazel-team): this is the command-line passed options, we should remove from Starlark
+  // probably.
+  public Depset getDefaultJavacFlagsStarlark() {
+    return Depset.of(String.class, commandLineJavacFlags);
   }
 
   @Override
@@ -233,9 +247,25 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     return useIjars;
   }
 
+  /**
+   * Returns true iff Java compilation should use ijars. Checks if the functions is been called from
+   * builtins.
+   */
+  @Override
+  public boolean getUseIjarsInStarlark(StarlarkThread thread) throws EvalException {
+    checkPrivateAccess(thread);
+    return useIjars;
+  }
+
   /** Returns true iff Java header compilation is enabled. */
   public boolean useHeaderCompilation() {
     return useHeaderCompilation;
+  }
+
+  @Override
+  public boolean useHeaderCompilationStarlark(StarlarkThread thread) throws EvalException {
+    checkPrivateAccess(thread);
+    return useHeaderCompilation();
   }
 
   /** Returns true iff dependency information is generated after compilation. */
@@ -243,8 +273,20 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     return generateJavaDeps;
   }
 
+  @Override
+  public boolean getGenerateJavaDepsStarlark(StarlarkThread thread) throws EvalException {
+    checkPrivateAccess(thread);
+    return getGenerateJavaDeps();
+  }
+
   public JavaClasspathMode getReduceJavaClasspath() {
     return javaClasspath;
+  }
+
+  @Override
+  public String getReduceJavaClasspathStarlark(StarlarkThread thread) throws EvalException {
+    checkPrivateAccess(thread);
+    return getReduceJavaClasspath().name();
   }
 
   public boolean inmemoryJdepsFiles() {
@@ -276,7 +318,7 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     return fixDepsTool;
   }
 
-  /** @return proper label only if --java_launcher= is specified, otherwise null. */
+  /** Returns proper label only if --java_launcher= is specified, otherwise null. */
   @StarlarkConfigurationField(
       name = "launcher",
       doc = "Returns the label provided with --java_launcher, if any.",
@@ -296,15 +338,11 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     return proguardBinary;
   }
 
-  /** Returns all labels provided with --extra_proguard_specs. */
-  public ImmutableList<Label> getExtraProguardSpecs() {
-    return extraProguardSpecs;
-  }
-
   /**
    * Returns whether the OPTIMIZATION stage of the bytecode optimizer will be split across two
    * actions.
    */
+  @Override
   public boolean splitBytecodeOptimizationPass() {
     return splitBytecodeOptimizationPass;
   }
@@ -314,6 +352,7 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
    * into. Note that if split_bytecode_optimization_pass is set, this will only change behavior if
    * it is > 2.
    */
+  @Override
   public int bytecodeOptimizationPassActions() {
     return bytecodeOptimizationPassActions;
   }
@@ -341,14 +380,47 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     return bytecodeOptimizer;
   }
 
+  @Override
+  public String getBytecodeOptimizerMnemonic() {
+    return bytecodeOptimizer.name();
+  }
+
+  @StarlarkConfigurationField(
+      name = "bytecode_optimizer",
+      doc = "Returns the label provided with --proguard_top, if any.",
+      defaultInToolRepository = true)
+  @Nullable
+  public Label getBytecodeOptimizerLabel() {
+    return bytecodeOptimizer.label().orNull();
+  }
+
   /** Returns true if the bytecode optimizer should incrementally optimize all Java artifacts. */
   public boolean runLocalJavaOptimizations() {
     return runLocalJavaOptimizations;
   }
 
+  @StarlarkConfigurationField(
+      name = "java_toolchain_bytecode_optimizer",
+      documented = false,
+      defaultInToolRepository = true)
+  @Nullable
+  public Label getBytecodeOptimizerLabelForJavaToolchain() {
+    if (runLocalJavaOptimizations) {
+      return bytecodeOptimizer.label().orNull();
+    } else {
+      return null;
+    }
+  }
+
   /** Returns the optimization configuration for local Java optimizations if they are enabled. */
-  public ImmutableList<Label> getLocalJavaOptimizationConfiguration() {
-    return localJavaOptimizationConfiguration;
+  @StarlarkConfigurationField(name = "local_java_optimization_configuration", documented = false)
+  @Nullable
+  public Label getLocalJavaOptimizationConfiguration() {
+    if (runLocalJavaOptimizations) {
+      return localJavaOptimizationConfiguration;
+    } else {
+      return null;
+    }
   }
 
   /**
@@ -365,6 +437,12 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
    */
   public boolean explicitJavaTestDeps() {
     return explicitJavaTestDeps;
+  }
+
+  @Override
+  public boolean explicitJavaTestDepsStarlark(StarlarkThread thread) throws EvalException {
+    checkPrivateAccess(thread);
+    return explicitJavaTestDeps();
   }
 
   /**
@@ -387,17 +465,35 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     return disallowJavaImportExports;
   }
 
+  /** Returns true if empty java_import jars are not allowed. */
+  public boolean disallowJavaImportEmptyJars() {
+    return disallowJavaImportEmptyJars;
+  }
+
+  /** Returns true if empty java_import jars are not allowed. */
+  @Override
+  public boolean getDisallowJavaImportEmptyJarsInStarlark(StarlarkThread thread)
+      throws EvalException {
+    checkPrivateAccess(thread);
+    return disallowJavaImportEmptyJars;
+  }
+
+  /** Returns true if java_import exports are not allowed. */
+  @Override
+  public boolean getDisallowJavaImportExportsInStarlark(StarlarkThread thread)
+      throws EvalException {
+    checkPrivateAccess(thread);
+    return disallowJavaImportExports;
+  }
+
   @Override
   public String starlarkOneVersionEnforcementLevel() {
     return oneVersionEnforcementLevel().name();
   }
 
+  @Override
   public boolean enforceOneVersionOnJavaTests() {
     return enforceOneVersionOnJavaTests;
-  }
-
-  public boolean enforceOneVersionValidationAction() {
-    return enforceOneVersionValidationAction;
   }
 
   public ImportDepsCheckingLevel getImportDepsCheckingLevel() {
@@ -420,6 +516,7 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     return jplPropagateCcLinkParamsStore;
   }
 
+  @Override
   public boolean addTestSupportToCompileTimeDeps() {
     return addTestSupportToCompileTimeDeps;
   }
@@ -450,7 +547,9 @@ public final class JavaConfiguration extends Fragment implements JavaConfigurati
     return experimentalEnableJspecify;
   }
 
-  public boolean requireJavaPluginInfo() {
-    return requireJavaPluginInfo;
+  @Override
+  public boolean autoCreateJavaTestDeployJars(StarlarkThread thread) throws EvalException {
+    BuiltinRestriction.failIfCalledOutsideDefaultAllowlist(thread);
+    return autoCreateDeployJarForJavaTests;
   }
 }

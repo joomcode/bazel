@@ -18,6 +18,7 @@ import static com.google.common.truth.Truth.assertThat;
 
 import com.google.devtools.build.lib.actions.ExecutionRequirements;
 import com.google.devtools.build.lib.analysis.test.ExecutionInfo;
+import com.google.devtools.build.lib.testutil.TestConstants;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -32,7 +33,18 @@ public class PyTestConfiguredTargetTest extends PyExecutableConfiguredTargetTest
   @Test
   public void macRequiresDarwinForExecution() throws Exception {
     getAnalysisMock().ccSupport().setupCcToolchainConfigForCpu(mockToolsConfig, "darwin_x86_64");
-    useConfiguration("--cpu=darwin_x86_64");
+    // The default mock environment doesn't have platform_mappings (which map --cpu to a platform),
+    // nor does it have Apple platforms defined, so we have to set one up ourselves.
+    mockToolsConfig.create(
+        "platforms/BUILD",
+        "platform(",
+        "  name = 'darwin_x86_64',",
+        "  constraint_values = [",
+        "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:macos',",
+        "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:x86_64',",
+        "  ],",
+        ")");
+    useConfiguration("--cpu=darwin_x86_64", "--platforms=//platforms:darwin_x86_64");
     scratch.file(
         "pkg/BUILD", //
         "py_test(",

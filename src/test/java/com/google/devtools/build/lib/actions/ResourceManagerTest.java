@@ -38,10 +38,11 @@ import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import com.google.devtools.build.lib.worker.Worker;
 import com.google.devtools.build.lib.worker.WorkerFactory;
 import com.google.devtools.build.lib.worker.WorkerKey;
-import com.google.devtools.build.lib.worker.WorkerPool;
+import com.google.devtools.build.lib.worker.WorkerPoolImpl;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.io.IOException;
-import java.time.Duration;
 import java.util.Collection;
+import java.util.NoSuchElementException;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -67,19 +68,21 @@ public final class ResourceManagerTest {
   @Before
   public void configureResourceManager() throws Exception {
     rm.setAvailableResources(
-        ResourceSet.create(/*memoryMb=*/ 1000, /*cpuUsage=*/ 1, /* localTestCount= */ 2));
+        ResourceSet.create(
+            ImmutableMap.of(
+                ResourceSet.MEMORY, 1000.0, ResourceSet.CPU, 1.0, "gpu", 2.0, "fancyresource", 1.5),
+            /* localTestCount= */ 2));
     counter = new AtomicInteger(0);
     sync = new CyclicBarrier(2);
     sync2 = new CyclicBarrier(2);
     rm.resetResourceUsage();
-    rm.setPrioritizeLocalActions(true);
     worker = mock(Worker.class);
     rm.setWorkerPool(createWorkerPool());
   }
 
-  private WorkerPool createWorkerPool() {
-    return new WorkerPool(
-        new WorkerPool.WorkerPoolConfig(
+  private WorkerPoolImpl createWorkerPool() {
+    return new WorkerPoolImpl(
+        new WorkerPoolImpl.WorkerPoolConfig(
             new WorkerFactory(fs.getPath("/workerBase")) {
               @Override
               public Worker create(WorkerKey key) {
@@ -92,31 +95,63 @@ public final class ResourceManagerTest {
               }
             },
             ImmutableList.of(),
-            ImmutableList.of(),
             ImmutableList.of()));
   }
 
   private ResourceHandle acquire(double ram, double cpu, int tests, ResourcePriority priority)
-      throws InterruptedException, IOException {
+      throws InterruptedException, IOException, ExecException {
     return rm.acquireResources(resourceOwner, ResourceSet.create(ram, cpu, tests), priority);
   }
 
   private ResourceHandle acquire(double ram, double cpu, int tests)
-      throws InterruptedException, IOException {
+      throws InterruptedException, IOException, ExecException {
     return acquire(ram, cpu, tests, ResourcePriority.LOCAL);
   }
 
   private ResourceHandle acquire(double ram, double cpu, int tests, String mnemonic)
-      throws InterruptedException, IOException {
+      throws InterruptedException, IOException, ExecException {
 
     return rm.acquireResources(
         resourceOwner,
-        ResourceSet.createWithWorkerKey(ram, cpu, tests, createWorkerKey(mnemonic)),
+        ResourceSet.create(
+            ImmutableMap.of(ResourceSet.MEMORY, ram, ResourceSet.CPU, cpu),
+            tests,
+            createWorkerKey(mnemonic)),
         ResourcePriority.LOCAL);
   }
 
+  @CanIgnoreReturnValue
+  private ResourceHandle acquire(
+      double ram,
+      double cpu,
+      ImmutableMap<String, Double> extraResources,
+      int tests,
+      ResourcePriority priority)
+      throws InterruptedException, IOException, NoSuchElementException, ExecException {
+    ImmutableMap.Builder<String, Double> resources = ImmutableMap.builder();
+    resources.putAll(extraResources).put(ResourceSet.MEMORY, ram).put(ResourceSet.CPU, cpu);
+    return rm.acquireResources(
+        resourceOwner, ResourceSet.create(resources.buildOrThrow(), tests), priority);
+  }
+
+  @CanIgnoreReturnValue
+  private ResourceHandle acquire(
+      double ram, double cpu, ImmutableMap<String, Double> extraResources, int tests)
+      throws InterruptedException, IOException, NoSuchElementException, ExecException {
+    return acquire(ram, cpu, extraResources, tests, ResourcePriority.LOCAL);
+  }
+
   private void release(double ram, double cpu, int tests) throws IOException, InterruptedException {
-    rm.releaseResources(resourceOwner, ResourceSet.create(ram, cpu, tests), /* worker=*/ null);
+    rm.releaseResources(resourceOwner, ResourceSet.create(ram, cpu, tests), /* worker= */ null);
+  }
+
+  private void release(
+      double ram, double cpu, ImmutableMap<String, Double> extraResources, int tests)
+      throws InterruptedException, IOException {
+    ImmutableMap.Builder<String, Double> resources = ImmutableMap.builder();
+    resources.putAll(extraResources).put(ResourceSet.MEMORY, ram).put(ResourceSet.CPU, cpu);
+    rm.releaseResources(
+        resourceOwner, ResourceSet.create(resources.buildOrThrow(), tests), /* worker= */ null);
   }
 
   private void validate(int count) {
@@ -165,6 +200,14 @@ public final class ResourceManagerTest {
     acquire(0, 0, bigTests);
     assertThat(rm.inUse()).isTrue();
     release(0, 0, bigTests);
+    assertThat(rm.inUse()).isFalse();
+
+    // Ditto, for extra resources:
+    ImmutableMap<String, Double> bigExtraResources =
+        ImmutableMap.of("gpu", 10.0, "fancyresource", 10.0);
+    acquire(0, 0, bigExtraResources, 0);
+    assertThat(rm.inUse()).isTrue();
+    release(0, 0, bigExtraResources, 0);
     assertThat(rm.inUse()).isFalse();
   }
 
@@ -248,10 +291,25 @@ public final class ResourceManagerTest {
   }
 
   @Test
+  public void testThatExtraResourcesCannotBeOverallocated() throws Exception {
+    assertThat(rm.inUse()).isFalse();
+
+    // Given a partially acquired extra resources:
+    acquire(0, 0, ImmutableMap.of("gpu", 1.0), 1);
+
+    // When a request for extra resources is made that would overallocate,
+    // Then the request fails:
+    TestThread thread1 = new TestThread(() -> acquire(0, 0, ImmutableMap.of("gpu", 1.1), 0));
+    thread1.start();
+    AssertionError e = assertThrows(AssertionError.class, () -> thread1.joinAndAssertState(1000));
+    assertThat(e).hasCauseThat().hasMessageThat().contains("is still alive");
+  }
+
+  @Test
   public void testHasResources() throws Exception {
     assertThat(rm.inUse()).isFalse();
     assertThat(rm.threadHasResources()).isFalse();
-    acquire(1, 0.1, 1);
+    acquire(1, 0.1, ImmutableMap.of("gpu", 1.0), 1);
     assertThat(rm.threadHasResources()).isTrue();
 
     // We have resources in this thread - make sure other threads
@@ -272,11 +330,15 @@ public final class ResourceManagerTest {
               assertThat(rm.threadHasResources()).isTrue();
               release(0, 0, 1);
               assertThat(rm.threadHasResources()).isFalse();
+              acquire(0, 0, ImmutableMap.of("gpu", 1.0), 0);
+              assertThat(rm.threadHasResources()).isTrue();
+              release(0, 0, ImmutableMap.of("gpu", 1.0), 0);
+              assertThat(rm.threadHasResources()).isFalse();
             });
     thread1.start();
     thread1.joinAndAssertState(10000);
 
-    release(1, 0.1, 1);
+    release(1, 0.1, ImmutableMap.of("gpu", 1.0), 1);
     assertThat(rm.threadHasResources()).isFalse();
     assertThat(rm.inUse()).isFalse();
   }
@@ -306,7 +368,7 @@ public final class ResourceManagerTest {
         new TestThread(
             () -> {
               sync2.await();
-              assertThat(rm.isAvailable(2000, 2, 0)).isFalse();
+              assertThat(isAvailable(rm, 2000, 2, 0)).isFalse();
               acquire(2000, 2, 0); // Will be blocked by the thread1.
               validate(2);
               sync2.await();
@@ -349,7 +411,7 @@ public final class ResourceManagerTest {
     // This should process the queue. If the request from above is still present, it will take all
     // the available memory. But it shouldn't.
     rm.setAvailableResources(
-        ResourceSet.create(/*memoryMb=*/ 2000, /*cpuUsage=*/ 1, /* localTestCount= */ 2));
+        ResourceSet.create(/* memoryMb= */ 2000, /* cpu= */ 1, /* localTestCount= */ 2));
     TestThread thread2 =
         new TestThread(
             () -> {
@@ -454,66 +516,6 @@ public final class ResourceManagerTest {
     thread4.join();
 
     assertThat(rm.inUse()).isFalse();
-  }
-
-  @Test
-  @SuppressWarnings("ThreadPriorityCheck")
-  public void testRelease_noPriority() throws Exception {
-    rm.setPrioritizeLocalActions(false);
-    assertThat(rm.inUse()).isFalse();
-
-    TestThread thread1 =
-        new TestThread(
-            () -> {
-              acquire(700, 0, 0);
-              sync.await();
-              sync2.await();
-              release(700, 0, 0);
-            });
-    thread1.start();
-    // Wait for thread1 to have acquired its RAM
-    sync.await(1, TimeUnit.SECONDS);
-
-    // Set up threads that compete for resources
-    CyclicBarrier syncDynamicStandalone =
-        startAcquireReleaseThread(ResourcePriority.DYNAMIC_STANDALONE);
-    while (rm.getWaitCount() < 1) {
-      Thread.yield();
-    }
-    CyclicBarrier syncDynamicWorker = startAcquireReleaseThread(ResourcePriority.DYNAMIC_WORKER);
-    while (rm.getWaitCount() < 2) {
-      Thread.yield();
-    }
-    CyclicBarrier syncLocal = startAcquireReleaseThread(ResourcePriority.LOCAL);
-    while (rm.getWaitCount() < 3) {
-      Thread.yield();
-    }
-
-    sync2.await();
-
-    while (syncLocal.getNumberWaiting()
-            + syncDynamicWorker.getNumberWaiting()
-            + syncDynamicStandalone.getNumberWaiting()
-        == 0) {
-      Thread.yield();
-    }
-    assertThat(rm.getWaitCount()).isEqualTo(2);
-    assertThat(syncDynamicStandalone.getNumberWaiting()).isEqualTo(1);
-    syncDynamicStandalone.await(1, TimeUnit.SECONDS);
-
-    while (syncDynamicWorker.getNumberWaiting() + syncLocal.getNumberWaiting() == 0) {
-      Thread.yield();
-    }
-    assertThat(syncDynamicWorker.getNumberWaiting()).isEqualTo(1);
-    assertThat(rm.getWaitCount()).isEqualTo(1);
-
-    syncDynamicWorker.await(1, TimeUnit.SECONDS);
-    while (syncLocal.getNumberWaiting() == 0) {
-      Thread.yield();
-    }
-    assertThat(syncLocal.getNumberWaiting()).isEqualTo(1);
-    assertThat(rm.getWaitCount()).isEqualTo(0);
-    syncLocal.await(1, TimeUnit.SECONDS);
   }
 
   @Test
@@ -668,6 +670,19 @@ public final class ResourceManagerTest {
   }
 
   @Test
+  public void testNonexistingResource() throws Exception {
+    // If we try to use nonexisting resource we should return an error
+    TestThread thread1 =
+        new TestThread(
+            () ->
+                assertThrows(
+                    UserExecException.class,
+                    () -> acquire(0, 0, ImmutableMap.of("nonexisting", 1.0), 0)));
+    thread1.start();
+    thread1.joinAndAssertState(1000);
+  }
+
+  @Test
   public void testAcquireWithWorker_acquireAndRelease() throws Exception {
     int memory = 100;
     when(worker.getWorkerKey()).thenReturn(createWorkerKey("dummy"));
@@ -683,92 +698,8 @@ public final class ResourceManagerTest {
     assertThat(rm.inUse()).isFalse();
   }
 
-  @Test
-  public void testReleaseWorker_highPriorityWorker() throws Exception {
-
-    String slowMenmonic = "SLOW";
-    String fastMenmonic = "FAST";
-
-    Worker slowWorker1 = mock(Worker.class);
-    Worker slowWorker2 = mock(Worker.class);
-    Worker fastWorker = mock(Worker.class);
-
-    WorkerKey slowWorkerKey = createWorkerKey(slowMenmonic);
-    WorkerKey fastWorkerKey = createWorkerKey(fastMenmonic);
-
-    when(slowWorker1.getWorkerKey()).thenReturn(slowWorkerKey);
-    when(slowWorker2.getWorkerKey()).thenReturn(slowWorkerKey);
-    when(fastWorker.getWorkerKey()).thenReturn(fastWorkerKey);
-
-    WorkerPool workerPool =
-        new WorkerPool(
-            new WorkerPool.WorkerPoolConfig(
-                new WorkerFactory(fs.getPath("/workerBase")) {
-                  int numOfSlowWorkers = 0;
-
-                  @Override
-                  public Worker create(WorkerKey key) {
-                    assertThat(key.getMnemonic()).isAnyOf(slowMenmonic, fastMenmonic);
-
-                    if (key.getMnemonic().equals(fastMenmonic)) {
-                      return fastWorker;
-                    }
-
-                    assertThat(numOfSlowWorkers).isLessThan(2);
-
-                    if (numOfSlowWorkers == 0) {
-                      numOfSlowWorkers++;
-                      return slowWorker1;
-                    }
-
-                    numOfSlowWorkers++;
-                    return slowWorker2;
-                  }
-
-                  @Override
-                  public boolean validateObject(WorkerKey key, PooledObject<Worker> p) {
-                    return true;
-                  }
-                },
-                ImmutableList.of(),
-                ImmutableList.of(),
-                /* highPriorityWorkers= */ ImmutableList.of(slowMenmonic)));
-    rm.setWorkerPool(workerPool);
-
-    TestThread slowThread1 =
-        new TestThread(
-            () -> {
-              ResourceHandle handle = acquire(100, 0.1, 0, slowMenmonic);
-              Thread.sleep(Duration.ofSeconds(3).toMillis());
-              // release resources
-              handle.close();
-            });
-
-    TestThread slowThread2 =
-        new TestThread(
-            () -> {
-              ResourceHandle handle = acquire(100, 0.1, 0, slowMenmonic);
-              Thread.sleep(Duration.ofSeconds(3).toMillis());
-              // release resources
-              handle.close();
-            });
-
-    TestThread fastThread =
-        new TestThread(
-            () -> {
-              Thread.sleep(Duration.ofSeconds(1).toMillis());
-              ResourceHandle handle = acquire(100, 0.1, 0, fastMenmonic);
-              // release resources
-              handle.close();
-            });
-
-    slowThread1.start();
-    slowThread2.start();
-    fastThread.start();
-
-    slowThread1.joinAndAssertState(Duration.ofSeconds(10).toMillis());
-    slowThread2.joinAndAssertState(Duration.ofSeconds(10).toMillis());
-    fastThread.joinAndAssertState(Duration.ofSeconds(10).toMillis());
+  synchronized boolean isAvailable(ResourceManager rm, double ram, double cpu, int localTestCount) {
+    return rm.areResourcesAvailable(ResourceSet.create(ram, cpu, localTestCount));
   }
 
   private static class ResourceOwnerStub implements ActionExecutionMetadata {
@@ -800,7 +731,7 @@ public final class ResourceManagerTest {
     }
 
     @Override
-    public boolean inputsDiscovered() {
+    public boolean inputsKnown() {
       throw new IllegalStateException();
     }
 
@@ -816,6 +747,11 @@ public final class ResourceManagerTest {
 
     @Override
     public NestedSet<Artifact> getInputs() {
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public NestedSet<Artifact> getSchedulingDependencies() {
       throw new IllegalStateException();
     }
 

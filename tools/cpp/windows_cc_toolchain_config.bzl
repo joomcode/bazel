@@ -14,6 +14,7 @@
 
 """A Starlark cc_toolchain configuration rule for Windows"""
 
+load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 load(
     "@bazel_tools//tools/cpp:cc_toolchain_config_lib.bzl",
     "action_config",
@@ -28,7 +29,6 @@ load(
     "variable_with_value",
     "with_feature_set",
 )
-load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 
 all_compile_actions = [
     ACTION_NAMES.c_compile,
@@ -187,7 +187,6 @@ def _impl(ctx):
                 "compiler_output_flags",
                 "nologo",
                 "msvc_env",
-                "parse_showincludes",
                 "user_compile_flags",
                 "sysroot",
             ],
@@ -202,7 +201,6 @@ def _impl(ctx):
                 "default_compile_flags",
                 "nologo",
                 "msvc_env",
-                "parse_showincludes",
                 "user_compile_flags",
                 "sysroot",
                 "unfiltered_compile_flags",
@@ -217,7 +215,6 @@ def _impl(ctx):
                 "compiler_output_flags",
                 "nologo",
                 "msvc_env",
-                "parse_showincludes",
                 "user_compile_flags",
                 "sysroot",
             ],
@@ -373,10 +370,12 @@ def _impl(ctx):
 
         archive_param_file_feature = feature(
             name = "archive_param_file",
+            enabled = True,
         )
 
         compiler_param_file_feature = feature(
             name = "compiler_param_file",
+            enabled = True,
         )
 
         copy_dynamic_libraries_to_binary_feature = feature(
@@ -723,6 +722,25 @@ def _impl(ctx):
             name = "generate_pdb_file",
         )
 
+        generate_linkmap_feature = feature(
+            name = "generate_linkmap",
+            flag_sets = [
+                flag_set(
+                    actions = [
+                        ACTION_NAMES.cpp_link_executable,
+                    ],
+                    flag_groups = [
+                        flag_group(
+                            flags = [
+                                "/MAP:%{output_execpath}.map",
+                            ],
+                            expand_if_available = "output_execpath",
+                        ),
+                    ],
+                ),
+            ],
+        )
+
         output_execpath_flags_feature = feature(
             name = "output_execpath_flags",
             flag_sets = [
@@ -787,6 +805,7 @@ def _impl(ctx):
 
         parse_showincludes_feature = feature(
             name = "parse_showincludes",
+            enabled = ctx.attr.supports_parse_showincludes,
             flag_sets = [
                 flag_set(
                     actions = [
@@ -800,6 +819,27 @@ def _impl(ctx):
                     flag_groups = [flag_group(flags = ["/showIncludes"])],
                 ),
             ],
+            env_sets = [
+                env_set(
+                    actions = [
+                        ACTION_NAMES.preprocess_assemble,
+                        ACTION_NAMES.c_compile,
+                        ACTION_NAMES.linkstamp_compile,
+                        ACTION_NAMES.cpp_compile,
+                        ACTION_NAMES.cpp_module_compile,
+                        ACTION_NAMES.cpp_header_parsing,
+                    ],
+                    # Force English (and thus a consistent locale) output so that Bazel can parse
+                    # the /showIncludes output without having to guess the encoding.
+                    env_entries = [env_entry(key = "VSLANG", value = "1033")],
+                ),
+            ],
+        )
+
+        # MSVC does not emit .d files.
+        no_dotd_file_feature = feature(
+            name = "no_dotd_file",
+            enabled = True,
         )
 
         treat_warnings_as_errors_feature = feature(
@@ -842,6 +882,32 @@ def _impl(ctx):
                         flag_group(
                             flags = ["/I%{system_include_paths}"],
                             iterate_over = "system_include_paths",
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        external_include_paths_feature = feature(
+            name = "external_include_paths",
+            flag_sets = [
+                flag_set(
+                    actions = [
+                        ACTION_NAMES.preprocess_assemble,
+                        ACTION_NAMES.linkstamp_compile,
+                        ACTION_NAMES.c_compile,
+                        ACTION_NAMES.cpp_compile,
+                        ACTION_NAMES.cpp_header_parsing,
+                        ACTION_NAMES.cpp_module_compile,
+                        ACTION_NAMES.clif_match,
+                        ACTION_NAMES.objc_compile,
+                        ACTION_NAMES.objcpp_compile,
+                    ],
+                    flag_groups = [
+                        flag_group(
+                            flags = ["/external:I%{external_include_paths}"],
+                            iterate_over = "external_include_paths",
+                            expand_if_available = "external_include_paths",
                         ),
                     ],
                 ),
@@ -1058,6 +1124,17 @@ def _impl(ctx):
             ],
             implies = ["msvc_compile_env", "msvc_link_env"],
         )
+
+        symbol_check_feature = feature(
+            name = "symbol_check",
+            flag_sets = [
+                flag_set(
+                    actions = [ACTION_NAMES.cpp_link_static_library],
+                    flag_groups = [flag_group(flags = ["/WX:4006"])],
+                ),
+            ],
+        )
+
         features = [
             no_legacy_features_feature,
             nologo_feature,
@@ -1070,9 +1147,12 @@ def _impl(ctx):
             msvc_compile_env_feature,
             msvc_link_env_feature,
             include_paths_feature,
+            external_include_paths_feature,
             preprocessor_defines_feature,
             parse_showincludes_feature,
+            no_dotd_file_feature,
             generate_pdb_file_feature,
+            generate_linkmap_feature,
             shared_flag_feature,
             linkstamps_feature,
             output_execpath_flags_feature,
@@ -1105,6 +1185,7 @@ def _impl(ctx):
             no_windows_export_all_symbols_feature,
             supports_dynamic_linker_feature,
             supports_interface_shared_libraries_feature,
+            symbol_check_feature,
         ]
     else:
         targets_windows_feature = feature(
@@ -1155,7 +1236,7 @@ def _impl(ctx):
                         ACTION_NAMES.lto_backend,
                         ACTION_NAMES.clif_match,
                     ],
-                    flag_groups = [flag_group(flags = ["-std=gnu++0x"])],
+                    flag_groups = [flag_group(flags = ["-std=gnu++14"])],
                 ),
             ],
         )
@@ -1209,6 +1290,7 @@ def _impl(ctx):
         if ctx.attr.cpu == "x64_windows" and ctx.attr.compiler == "mingw-gcc":
             archive_param_file_feature = feature(
                 name = "archive_param_file",
+                enabled = True,
             )
 
             compiler_param_file_feature = feature(
@@ -1387,6 +1469,7 @@ cc_toolchain_config = rule(
         "dbg_mode_debug_flag": attr.string(),
         "fastbuild_mode_debug_flag": attr.string(),
         "tool_bin_path": attr.string(default = "not_found"),
+        "supports_parse_showincludes": attr.bool(),
     },
     provides = [CcToolchainConfigInfo],
 )

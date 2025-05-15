@@ -26,23 +26,15 @@ import com.google.devtools.build.lib.analysis.config.CoreOptions;
 import com.google.devtools.build.lib.analysis.config.Fragment;
 import com.google.devtools.build.lib.analysis.config.RequiresOptions;
 import com.google.devtools.build.lib.analysis.starlark.annotations.StarlarkConfigurationField;
-import com.google.devtools.build.lib.cmdline.BazelModuleContext;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.rules.apple.AppleCommandLineOptions.AppleBitcodeMode;
+import com.google.devtools.build.lib.packages.BuiltinRestriction;
 import com.google.devtools.build.lib.rules.apple.ApplePlatform.PlatformType;
 import com.google.devtools.build.lib.starlarkbuildapi.apple.AppleConfigurationApi;
 import com.google.devtools.build.lib.util.CPU;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.EnumMap;
 import java.util.List;
-import java.util.Map;
-import javax.annotation.Nullable;
 import net.starlark.java.eval.EvalException;
-import net.starlark.java.eval.Module;
-import net.starlark.java.eval.Starlark;
 import net.starlark.java.eval.StarlarkThread;
 import net.starlark.java.eval.StarlarkValue;
 
@@ -75,9 +67,11 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
   /** Prefix for macOS cpu values */
   private static final String MACOS_CPU_PREFIX = "darwin_";
 
-  // TODO(b/180572694): Remove after platforms based toolchain resolution supported.
-  /** Prefix for forced iOS and tvOS simulator cpu values */
-  public static final String FORCED_SIMULATOR_CPU_PREFIX = "sim_";
+  /** Prefix for simulator environment cpu values */
+  public static final String SIMULATOR_ENVIRONMENT_CPU_PREFIX = "sim_";
+
+  /** Prefix for device environment cpu values */
+  public static final String DEVICE_ENVIRONMENT_CPU_PREFIX = "device_";
 
   /** Default cpu for iOS builds. */
   @VisibleForTesting
@@ -85,11 +79,10 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
 
   private final PlatformType applePlatformType;
   private final ConfigurationDistinguisher configurationDistinguisher;
-  private final EnumMap<ApplePlatform.PlatformType, AppleBitcodeMode> platformBitcodeModes;
   private final Label xcodeConfigLabel;
   private final AppleCommandLineOptions options;
   private final AppleCpus appleCpus;
-  private final boolean mandatoryMinimumVersion;
+  private final String cpu;
 
   public AppleConfiguration(BuildOptions buildOptions) {
     AppleCommandLineOptions options = buildOptions.get(AppleCommandLineOptions.class);
@@ -98,10 +91,11 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
     this.applePlatformType =
         Preconditions.checkNotNull(options.applePlatformType, "applePlatformType");
     this.configurationDistinguisher = options.configurationDistinguisher;
-    this.platformBitcodeModes = collectBitcodeModes(options.appleBitcodeMode);
     this.xcodeConfigLabel =
         Preconditions.checkNotNull(options.xcodeVersionConfig, "xcodeConfigLabel");
-    this.mandatoryMinimumVersion = options.mandatoryMinimumVersion;
+    // AppleConfiguration should not have this knowledge. This is a temporary workaround
+    // for Starlarkification, until apple rules are toolchainized.
+    this.cpu = buildOptions.get(CoreOptions.class).cpu;
   }
 
   /** A class that contains information pertaining to Apple CPUs. */
@@ -113,6 +107,10 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
           (options.iosMultiCpus == null || options.iosMultiCpus.isEmpty())
               ? ImmutableList.of(iosCpuFromCpu(coreOptions.cpu))
               : ImmutableList.copyOf(options.iosMultiCpus);
+      ImmutableList<String> visionosCpus =
+          (options.visionosCpus == null || options.visionosCpus.isEmpty())
+              ? ImmutableList.of(AppleCommandLineOptions.DEFAULT_VISIONOS_CPU)
+              : ImmutableList.copyOf(options.visionosCpus);
       ImmutableList<String> watchosCpus =
           (options.watchosCpus == null || options.watchosCpus.isEmpty())
               ? ImmutableList.of(AppleCommandLineOptions.DEFAULT_WATCHOS_CPU)
@@ -131,12 +129,20 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
               : ImmutableList.copyOf(options.catalystCpus);
 
       return new AutoValue_AppleConfiguration_AppleCpus(
-          appleSplitCpu, iosMultiCpus, watchosCpus, tvosCpus, macosCpus, catalystCpus);
+          appleSplitCpu,
+          iosMultiCpus,
+          visionosCpus,
+          watchosCpus,
+          tvosCpus,
+          macosCpus,
+          catalystCpus);
     }
 
     abstract String appleSplitCpu();
 
     abstract ImmutableList<String> iosMultiCpus();
+
+    abstract ImmutableList<String> visionosCpus();
 
     abstract ImmutableList<String> watchosCpus();
 
@@ -222,21 +228,19 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
    */
   @Override
   public String getSingleArchitecture() {
-    return getSingleArchitecture(applePlatformType, appleCpus, /* removeSimPrefix= */ true);
+    return getSingleArchitecture(applePlatformType, appleCpus, /* removeEnvironmentPrefix= */ true);
   }
 
   private static String getSingleArchitecture(
-      PlatformType applePlatformType, AppleCpus appleCpus, boolean removeSimPrefix) {
-    // The removeSimPrefix argument is necessary due to a simulator and device both using arm64
-    // architecture. In the case of Starlark asking for the architecture, we should return the
-    // actual architecture (arm64) but in other cases in this class what we actually want is the
-    // CPU without the ios/tvos prefix (e.g. sim_arm64). This parameter is provided in the private
-    // method so that internal to this class we are able to use both without duplicating retrieval
-    // logic.
-    // TODO(b/180572694): Remove removeSimPrefix parameter once platforms are used instead of CPU
+      PlatformType applePlatformType, AppleCpus appleCpus, boolean removeEnvironmentPrefix) {
+    // The removeEnvironmentPrefix argument is used to remove the environment data from the CPU
+    // - e.g. whether the target CPU is for simulator, device or catalyst. For older CPUs,
+    // no environment may be provided.
     String cpu = getPrefixedAppleCpu(applePlatformType, appleCpus);
-    if (removeSimPrefix && cpu.startsWith(FORCED_SIMULATOR_CPU_PREFIX)) {
-      cpu = cpu.substring(FORCED_SIMULATOR_CPU_PREFIX.length());
+    if (removeEnvironmentPrefix && cpu.startsWith(SIMULATOR_ENVIRONMENT_CPU_PREFIX)) {
+      cpu = cpu.substring(SIMULATOR_ENVIRONMENT_CPU_PREFIX.length());
+    } else if (removeEnvironmentPrefix && cpu.startsWith(DEVICE_ENVIRONMENT_CPU_PREFIX)) {
+      cpu = cpu.substring(DEVICE_ENVIRONMENT_CPU_PREFIX.length());
     }
     return cpu;
   }
@@ -248,6 +252,8 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
     switch (applePlatformType) {
       case IOS:
         return appleCpus.iosMultiCpus().get(0);
+      case VISIONOS:
+        return appleCpus.visionosCpus().get(0);
       case WATCHOS:
         return appleCpus.watchosCpus().get(0);
       case TVOS:
@@ -296,6 +302,8 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
     switch (platformType) {
       case IOS:
         return appleCpus.iosMultiCpus();
+      case VISIONOS:
+        return appleCpus.visionosCpus();
       case WATCHOS:
         return appleCpus.watchosCpus();
       case TVOS:
@@ -319,7 +327,7 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
   public ApplePlatform getSingleArchPlatform() {
     return ApplePlatform.forTarget(
         applePlatformType,
-        getSingleArchitecture(applePlatformType, appleCpus, /* removeSimPrefix= */ false));
+        getSingleArchitecture(applePlatformType, appleCpus, /* removeEnvironmentPrefix= */ false));
   }
 
   /**
@@ -341,6 +349,14 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
           }
         }
         return ApplePlatform.IOS_SIMULATOR;
+      case VISIONOS:
+        for (String arch : architectures) {
+          if (ApplePlatform.forTarget(PlatformType.VISIONOS, arch)
+              == ApplePlatform.VISIONOS_DEVICE) {
+            return ApplePlatform.VISIONOS_DEVICE;
+          }
+        }
+        return ApplePlatform.VISIONOS_SIMULATOR;
       case WATCHOS:
         for (String arch : architectures) {
           if (ApplePlatform.forTarget(PlatformType.WATCHOS, arch) == ApplePlatform.WATCHOS_DEVICE) {
@@ -364,39 +380,13 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
     }
   }
 
-  /**
-   * Returns the bitcode mode to use for compilation steps. This should only be invoked in
-   * single-architecture contexts.
-   *
-   * <p>Users can control bitcode mode using the {@code apple_bitcode} build flag, but bitcode
-   * will be disabled for all simulator architectures regardless of this flag.
-   *
-   * @see AppleBitcodeMode
-   */
   @Override
-  public AppleBitcodeMode getBitcodeMode() {
-    return getAppleBitcodeMode(applePlatformType, appleCpus, platformBitcodeModes);
-  }
-
-  /** Returns the bitcode mode to use for compilation steps. */
-  public static AppleBitcodeMode getAppleBitcodeMode(
-      PlatformType applePlatformType,
-      AppleCpus appleCpus,
-      EnumMap<ApplePlatform.PlatformType, AppleBitcodeMode> platformBitcodeModes) {
-    String architecture =
-        getSingleArchitecture(applePlatformType, appleCpus, /* removeSimPrefix= */ false);
-    String cpuString = ApplePlatform.cpuStringForTarget(applePlatformType, architecture);
-    if (ApplePlatform.isApplePlatform(cpuString)) {
-      ApplePlatform platform = ApplePlatform.forTarget(applePlatformType, architecture);
-      if (platform.isDevice()) {
-        return platformBitcodeModes.get(applePlatformType);
-      }
-    }
-    return AppleBitcodeMode.NONE;
+  public String getBitcodeMode() {
+    return "none";
   }
 
   /**
-   * Returns the label of the xcode_config rule to use for resolving the host system xcode version.
+   * Returns the label of the xcode_config rule to use for resolving the exec system xcode version.
    */
   @StarlarkConfigurationField(
       name = "xcode_config_label",
@@ -407,9 +397,9 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
     return xcodeConfigLabel;
   }
 
-  @Nullable
   @Override
-  public String getOutputDirectoryName() {
+  public void processForOutputPathMnemonic(Fragment.OutputDirectoriesContext ctx)
+      throws Fragment.OutputDirectoriesContext.AddToMnemonicException {
     List<String> components = new ArrayList<>();
     if (!appleCpus.appleSplitCpu().isEmpty()) {
       components.add(applePlatformType.toString().toLowerCase());
@@ -423,27 +413,15 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
       components.add(configurationDistinguisher.getFileSystemName());
     }
 
-    if (components.isEmpty()) {
-      return null;
+    if (!components.isEmpty()) {
+      ctx.addToMnemonic(Joiner.on('-').join(components));
     }
-    return Joiner.on('-').join(components);
   }
 
-  /** Returns true if the minimum_os_version attribute should be mandatory on rules with linking. */
   @Override
-  public boolean isMandatoryMinimumVersionForStarlark(StarlarkThread thread) throws EvalException {
-    RepositoryName repository =
-        BazelModuleContext.of(Module.ofInnermostEnclosingStarlarkFunction(thread))
-            .label()
-            .getRepository();
-    if (!"@_builtins".equals(repository.getNameWithAt())) {
-      throw Starlark.errorf("private API only for use by builtins");
-    }
-    return isMandatoryMinimumVersion();
-  }
-
-  public boolean isMandatoryMinimumVersion() {
-    return mandatoryMinimumVersion;
+  public String getCpuForStarlark(StarlarkThread thread) throws EvalException {
+    BuiltinRestriction.failIfCalledOutsideBuiltins(thread);
+    return cpu;
   }
 
   @Override
@@ -464,35 +442,6 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
   }
 
   /**
-   * Compute the platform-type-to-bitcode-mode mapping from the pairs that were passed on the
-   * command line.
-   */
-  public static EnumMap<ApplePlatform.PlatformType, AppleBitcodeMode> collectBitcodeModes(
-      List<Map.Entry<ApplePlatform.PlatformType, AppleBitcodeMode>> platformModeMappings) {
-    EnumMap<ApplePlatform.PlatformType, AppleBitcodeMode> modes =
-        new EnumMap<>(ApplePlatform.PlatformType.class);
-    ApplePlatform.PlatformType[] allPlatforms = ApplePlatform.PlatformType.values();
-
-    // Seed the map with the default mode for every key so that there is a valid mode for every
-    // platform.
-    // TODO(blaze-team): Default to embedded_markers when fully implemented.
-    Arrays.stream(allPlatforms).forEach(platform -> modes.put(platform, AppleBitcodeMode.NONE));
-
-    // Process the entries in order. If we encounter one with a null key, apply the mode to all
-    // platforms; otherwise, apply it only to that specific platform. This ensures that the later
-    // options override the earlier options.
-    for (Map.Entry<ApplePlatform.PlatformType, AppleBitcodeMode> entry : platformModeMappings) {
-      if (entry.getKey() == null) {
-        Arrays.stream(allPlatforms).forEach(platform -> modes.put(platform, entry.getValue()));
-      } else {
-        modes.put(entry.getKey(), entry.getValue());
-      }
-    }
-
-    return modes;
-  }
-
-  /**
    * Value used to avoid multiple configurations from conflicting. No two instances of this
    * transition may exist with the same value in a single Bazel invocation.
    */
@@ -500,6 +449,8 @@ public class AppleConfiguration extends Fragment implements AppleConfigurationAp
     UNKNOWN("unknown"),
     /** Distinguisher for {@code apple_binary} rule with "ios" platform_type. */
     APPLEBIN_IOS("applebin_ios"),
+    /** Distinguisher for {@code apple_binary} rule with "visionos" platform_type. */
+    APPLEBIN_VISIONOS("applebin_visionos"),
     /** Distinguisher for {@code apple_binary} rule with "watchos" platform_type. */
     APPLEBIN_WATCHOS("applebin_watchos"),
     /** Distinguisher for {@code apple_binary} rule with "tvos" platform_type. */

@@ -3,6 +3,9 @@ Book: /_book.yaml
 
 # Installing Bazel
 
+{% dynamic setvar source_file "site/en/install/index.md" %}
+{% include "_buttons.html" %}
+
 This page describes the various platforms supported by Bazel and links
 to the packages for more details.
 
@@ -13,9 +16,9 @@ to the packages for more details.
 Bazel community members maintain these packages. The Bazel team doesn't
 officially support them. Contact the package maintainers for support.
 
-*   [Arch Linux](https://www.archlinux.org/packages/community/x86_64/bazel/){: .external}
-*   [Fedora 25, 26, 27, 28, and CentOS 7](/install/redhat)
+*   [Arch Linux][arch]{: .external}
 *   [CentOS 6](https://github.com/sub-mod/bazel-builds){: .external}
+*   [Debian](https://qa.debian.org/developer.php?email=team%2Bbazel%40tracker.debian.org){: .external}
 *   [FreeBSD](https://www.freshports.org/devel/bazel){: .external}
 *   [Gentoo](https://packages.gentoo.org/packages/dev-util/bazel){: .external}
 *   [Linuxbrew](https://github.com/Linuxbrew/homebrew-core/blob/master/Formula/bazel.rb){: .external}
@@ -27,6 +30,8 @@ officially support them. Contact the package maintainers for support.
 
 ## Community-supported architectures {:#community-supported-architectures}
 
-*   [ppc64el](https://oplab9.parqtec.unicamp.br/pub/ppc64el/bazel){: .external}
+*   [ppc64el](https://ftp2.osuosl.org/pub/ppc64el/bazel/){: .external}
 
 For other platforms, you can try to [compile from source](/install/compile-source).
+
+[arch]: https://archlinux.org/packages/extra/x86_64/bazel/

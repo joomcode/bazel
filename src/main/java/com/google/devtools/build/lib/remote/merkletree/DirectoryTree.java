@@ -16,16 +16,15 @@ package com.google.devtools.build.lib.remote.merkletree;
 import build.bazel.remote.execution.v2.Digest;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.protobuf.ByteString;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.SortedSet;
+import java.util.TreeSet;
 
 /**
  * Intermediate tree representation of a list of lexicographically sorted list of files. Each node
@@ -34,11 +33,12 @@ import java.util.SortedSet;
 final class DirectoryTree {
 
   interface Visitor {
+
     void visitDirectory(
         PathFragment dirname,
-        List<FileNode> files,
-        List<SymlinkNode> symlinks,
-        List<DirectoryNode> dirs);
+        SortedSet<FileNode> files,
+        SortedSet<SymlinkNode> symlinks,
+        SortedSet<DirectoryNode> dirs);
   }
 
   abstract static class Node implements Comparable<Node> {
@@ -77,37 +77,52 @@ final class DirectoryTree {
     private final ByteString data;
     private final Digest digest;
     private final boolean isExecutable;
+    private final boolean toolInput;
 
     /**
      * Create a FileNode with its executable bit set.
      *
      * <p>We always treat files as executable since Bazel will `chmod 555` on the output files of an
-     * action within ActionMetadataHandler#getMetadata after action execution if no metadata was
+     * action within ActionOutputMetadataStore#getMetadata after action execution if no metadata was
      * injected. We can't use real executable bit of the file until this behaviour is changed. See
      * https://github.com/bazelbuild/bazel/issues/13262 for more details.
      */
     static FileNode createExecutable(String pathSegment, Path path, Digest digest) {
-      return new FileNode(pathSegment, path, digest, /* isExecutable= */ true);
+      return new FileNode(pathSegment, path, digest, /* isExecutable= */ true, false);
     }
 
-    static FileNode createExecutable(String pathSegment, ByteString data, Digest digest) {
-      return new FileNode(pathSegment, data, digest, /* isExecutable= */ true);
+    static FileNode createExecutable(
+        String pathSegment, Path path, Digest digest, boolean toolInput) {
+      return new FileNode(pathSegment, path, digest, /* isExecutable= */ true, toolInput);
     }
 
-    private FileNode(String pathSegment, Path path, Digest digest, boolean isExecutable) {
+    static FileNode createExecutable(
+        String pathSegment, ByteString data, Digest digest, boolean toolInput) {
+      return new FileNode(pathSegment, data, digest, /* isExecutable= */ true, toolInput);
+    }
+
+    private FileNode(
+        String pathSegment, Path path, Digest digest, boolean isExecutable, boolean toolInput) {
       super(pathSegment);
       this.path = Preconditions.checkNotNull(path, "path");
       this.data = null;
       this.digest = Preconditions.checkNotNull(digest, "digest");
       this.isExecutable = isExecutable;
+      this.toolInput = toolInput;
     }
 
-    private FileNode(String pathSegment, ByteString data, Digest digest, boolean isExecutable) {
+    private FileNode(
+        String pathSegment,
+        ByteString data,
+        Digest digest,
+        boolean isExecutable,
+        boolean toolInput) {
       super(pathSegment);
       this.path = null;
       this.data = Preconditions.checkNotNull(data, "data");
       this.digest = Preconditions.checkNotNull(digest, "digest");
       this.isExecutable = isExecutable;
+      this.toolInput = toolInput;
     }
 
     Digest getDigest() {
@@ -126,9 +141,13 @@ final class DirectoryTree {
       return isExecutable;
     }
 
+    boolean isToolInput() {
+      return toolInput;
+    }
+
     @Override
     public int hashCode() {
-      return Objects.hash(super.hashCode(), path, data, digest, isExecutable);
+      return Objects.hash(super.hashCode(), path, data, digest, toolInput, isExecutable);
     }
 
     @Override
@@ -139,6 +158,7 @@ final class DirectoryTree {
             && Objects.equals(path, other.path)
             && Objects.equals(data, other.data)
             && Objects.equals(digest, other.digest)
+            && toolInput == other.toolInput
             && isExecutable == other.isExecutable;
       }
       return false;
@@ -184,26 +204,44 @@ final class DirectoryTree {
   }
 
   static class DirectoryNode extends Node {
-    private final SortedSet<Node> children = Sets.newTreeSet();
+
+    private final SortedSet<FileNode> files = new TreeSet<>();
+    private final SortedSet<SymlinkNode> symlinks = new TreeSet<>();
+    private final SortedSet<DirectoryNode> subdirs = new TreeSet<>();
 
     DirectoryNode(String pathSegment) {
       super(pathSegment);
     }
 
-    boolean addChild(Node child) {
-      return children.add(Preconditions.checkNotNull(child, "child"));
+    @CanIgnoreReturnValue
+    boolean addChild(FileNode file) {
+      return files.add(Preconditions.checkNotNull(file, "file"));
+    }
+
+    @CanIgnoreReturnValue
+    boolean addChild(SymlinkNode symlink) {
+      return symlinks.add(Preconditions.checkNotNull(symlink, "symlink"));
+    }
+
+    @CanIgnoreReturnValue
+    boolean addChild(DirectoryNode subdir) {
+      return subdirs.add(Preconditions.checkNotNull(subdir, "subdir"));
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(super.hashCode(), children.hashCode());
+      return Objects.hash(
+          super.hashCode(), files.hashCode(), symlinks.hashCode(), subdirs.hashCode());
     }
 
     @Override
     public boolean equals(Object o) {
       if (o instanceof DirectoryNode) {
         DirectoryNode other = (DirectoryNode) o;
-        return super.equals(other) && Objects.equals(children, other.children);
+        return super.equals(other)
+            && Objects.equals(files, other.files)
+            && Objects.equals(symlinks, other.symlinks)
+            && Objects.equals(subdirs, other.subdirs);
       }
       return false;
     }
@@ -245,23 +283,10 @@ final class DirectoryTree {
       return;
     }
 
-    List<FileNode> files = new ArrayList<>(dir.children.size());
-    List<SymlinkNode> symlinks = new ArrayList<>();
-    List<DirectoryNode> dirs = new ArrayList<>();
-    for (Node child : dir.children) {
-      if (child instanceof FileNode) {
-        files.add((FileNode) child);
-      } else if (child instanceof SymlinkNode) {
-        symlinks.add((SymlinkNode) child);
-      } else if (child instanceof DirectoryNode) {
-        dirs.add((DirectoryNode) child);
-        visit(visitor, dirname.getRelative(child.pathSegment));
-      } else {
-        throw new IllegalStateException(
-            String.format("Node type '%s' is not supported", child.getClass().getSimpleName()));
-      }
+    for (DirectoryNode subdir : dir.subdirs) {
+      visit(visitor, dirname.getRelative(subdir.getPathSegment()));
     }
-    visitor.visitDirectory(dirname, files, symlinks, dirs);
+    visitor.visitDirectory(dirname, dir.files, dir.symlinks, dir.subdirs);
   }
 
   @Override

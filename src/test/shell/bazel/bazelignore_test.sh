@@ -130,7 +130,6 @@ test_broken_BUILD_files_ignored_subdir() {
     # Test patterns with exclude.
     bazel build -- //ignoreme/deep/... -//ignoreme/... >& "$TEST_log" \
         || fail "Expected success"
-    expect_log "WARNING: Pattern '//ignoreme/deep/...' was filtered out by ignored directory 'ignoreme'"
     expect_not_log "circular symlinks detected"
     expect_not_log "ignoreme/deep/deeper"
 
@@ -205,6 +204,17 @@ EOI
         || fail "Aquery should complete without error."
     cat output >> "$TEST_log"
     assert_not_contains "ignoreme" output
+}
+
+test_invalid_path() {
+    rm -rf work && mkdir work && cd work
+    create_workspace_with_default_repos WORKSPACE
+    echo -e "foo/\0/bar" > .bazelignore
+    echo 'filegroup(name="f", srcs=glob(["**"]))' > BUILD
+    if bazel build //... 2> "$TEST_log"; then
+      fail "Bazel build should have failed"
+    fi
+    expect_log "java.nio.file.InvalidPathException: Nul character not allowed"
 }
 
 run_suite "Integration tests for .bazelignore"

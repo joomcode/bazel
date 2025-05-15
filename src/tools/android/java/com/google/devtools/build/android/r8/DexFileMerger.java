@@ -24,8 +24,8 @@ import com.android.tools.r8.origin.PathOrigin;
 import com.android.tools.r8.utils.ExceptionDiagnostic;
 import com.android.tools.r8.utils.StringDiagnostic;
 import com.google.common.collect.Maps;
-import com.google.devtools.build.android.Converters.ExistingPathConverter;
-import com.google.devtools.build.android.Converters.PathConverter;
+import com.google.devtools.build.android.r8.OptionsConverters.ExistingPathConverter;
+import com.google.devtools.build.android.r8.OptionsConverters.PathConverter;
 import com.google.devtools.common.options.EnumConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
@@ -36,11 +36,11 @@ import com.google.devtools.common.options.ShellQuotedParamsFilePreProcessor;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.lang.reflect.Method;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -67,6 +67,8 @@ public class DexFileMerger {
   private static final String DEFAULT_OUTPUT_ARCHIVE_FILENAME = "classes.dex.jar";
 
   private static final boolean PRINT_ARGS = false;
+
+  private static final int NATIVE_MULTIDEX_API_LEVEL = 21;
 
   /** Strategies for outputting multiple {@code .dex} files supported by {@link DexFileMerger}. */
   public enum MultidexStrategy {
@@ -296,6 +298,17 @@ public class DexFileMerger {
     return shard;
   }
 
+  private static int getInputNumber(
+      Origin origin, Map<String, Integer> inputOrdering, DiagnosticsHandler handler) {
+    Integer number = inputOrdering.get(origin.parent().part());
+    if (number == null) {
+      String message = "Class parent path not found among input paths: " + origin;
+      handler.error(new StringDiagnostic(message, origin));
+      throw new IllegalStateException(message);
+    }
+    return number;
+  }
+
   public static void run(String[] args) throws CompilationFailedException, IOException {
     Options options = parseArguments(args);
 
@@ -318,13 +331,39 @@ public class DexFileMerger {
 
     D8Command.Builder builder = D8Command.builder();
 
+    // If multidex is enabled but no main-dex list given then the build must be targeting
+    // devices with native multidex support.
+    if (options.multidexMode.isMultidexAllowed() && options.mainDexListFile == null) {
+      builder.setMinApiLevel(NATIVE_MULTIDEX_API_LEVEL);
+    }
+
+    // The merge step assumes that no further desugaring is needed.
+    builder = builder.setDisableDesugaring(true);
+
+    // D8 does not allow duplicate classes. Resolve conflicts based on input order.
     Map<String, Integer> inputOrdering =
         Maps.newHashMapWithExpectedSize(options.inputArchives.size());
     int sequenceNumber = 0;
     for (Path s : options.inputArchives) {
-      builder.addProgramFiles(s);
+      builder = builder.addProgramFiles(s);
       inputOrdering.put(s.toString(), sequenceNumber++);
     }
+    builder =
+        builder.setClassConflictResolver(
+            (reference, origins, handler) -> {
+              Iterator<Origin> it = origins.iterator();
+              Origin first = it.next();
+              int firstNumber = getInputNumber(first, inputOrdering, handler);
+              while (it.hasNext()) {
+                Origin next = it.next();
+                int nextNumber = getInputNumber(next, inputOrdering, handler);
+                if (firstNumber > nextNumber) {
+                  first = next;
+                  firstNumber = nextNumber;
+                }
+              }
+              return first;
+            });
 
     // Determine enabling multidexing and file indexing.
     Integer singleFixedFileIndex = null;
@@ -345,31 +384,15 @@ public class DexFileMerger {
         break;
     }
 
-    if (options.mainDexListFile != null) {
-      builder.addMainDexListFiles(options.mainDexListFile);
+    if (builder.getMinApiLevel() < NATIVE_MULTIDEX_API_LEVEL && options.mainDexListFile != null) {
+      builder = builder.addMainDexListFiles(options.mainDexListFile);
     }
 
     ArchiveConsumer consumer =
         new ArchiveConsumer(options.outputArchive, options.dexPrefix, singleFixedFileIndex);
-    builder.setProgramConsumer(consumer);
+    builder = builder.setProgramConsumer(consumer);
 
-    // Try to run through com.android.tools.r8.DexFileMergerHelper.run. If not found, which
-    // can happen when bazel use a d8.jar from a Platform SDK, fall back to plain D8 execution.
-    try {
-      Class<?> dexFileMergerHelper = Class.forName("com.android.tools.r8.DexFileMergerHelper");
-      try {
-        Method run =
-            dexFileMergerHelper.getDeclaredMethod("run", D8Command.class, Boolean.class, Map.class);
-        // DexFileMergerHelper.run(builder.build(), false, inputOrdering);
-        run.invoke(null, builder.build(), false, inputOrdering);
-      } catch (NoSuchMethodException e) {
-        D8.run(builder.build());
-      } catch (ReflectiveOperationException e) {
-        throw new AssertionError("Unable to invoke run in DexFileMergerHelper", e);
-      }
-    } catch (ClassNotFoundException e) {
-      D8.run(builder.build());
-    }
+    D8.run(builder.build());
 
     // If input was empty we still need to write out an empty zip.
     if (!consumer.hasWrittenSomething()) {
@@ -378,7 +401,7 @@ public class DexFileMerger {
     }
   }
 
-  public static void main(String[] args) throws CompilationFailedException {
+  public static void main(String[] args) {
     try {
       if (PRINT_ARGS) {
         printArgs(args);
@@ -386,7 +409,7 @@ public class DexFileMerger {
       run(args);
     } catch (CompilationFailedException | IOException e) {
       System.err.println("Merge failed: " + e.getMessage());
-      throw new CompilationFailedException("Merge failed: " + e.getMessage());
+      throw new RuntimeException("Merge failed: " + e.getMessage(), e);
     }
   }
 

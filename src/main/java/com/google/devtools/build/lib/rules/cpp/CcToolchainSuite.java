@@ -13,10 +13,14 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.cpp;
 
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
+
+import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.LicensesProvider;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
@@ -27,8 +31,12 @@ import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
+import java.util.HashMap;
 import java.util.Map;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkFunction;
+import net.starlark.java.syntax.Location;
 
 /**
  * Implementation of the {@code cc_toolchain_suite} rule.
@@ -38,6 +46,21 @@ import javax.annotation.Nullable;
  * com.google.devtools.build.lib.rules.cpp.CppConfiguration}.
  */
 public class CcToolchainSuite implements RuleConfiguredTargetFactory {
+  private static final String TOOLCHAIN_ATTRIBUTE_NAME = "toolchains";
+
+  private static TemplateVariableInfo createMakeVariableProvider(
+      CcToolchainProvider toolchainProvider, Location location) {
+
+    HashMap<String, String> makeVariables =
+        new HashMap<>(toolchainProvider.getAdditionalMakeVariables());
+
+    // Add make variables from the toolchainProvider, also.
+    ImmutableMap.Builder<String, String> ccProviderMakeVariables = new ImmutableMap.Builder<>();
+    toolchainProvider.addGlobalMakeVariables(ccProviderMakeVariables);
+    makeVariables.putAll(ccProviderMakeVariables.buildOrThrow());
+
+    return new TemplateVariableInfo(ImmutableMap.copyOf(makeVariables), location);
+  }
 
   @Override
   @Nullable
@@ -49,7 +72,7 @@ public class CcToolchainSuite implements RuleConfiguredTargetFactory {
     String compiler = cppConfiguration.getCompilerFromOptions();
     String key = transformedCpu + (Strings.isNullOrEmpty(compiler) ? "" : ("|" + compiler));
     Map<String, Label> toolchains =
-        ruleContext.attributes().get("toolchains", BuildType.LABEL_DICT_UNARY);
+        ruleContext.attributes().get(TOOLCHAIN_ATTRIBUTE_NAME, BuildType.LABEL_DICT_UNARY);
     Label selectedCcToolchain = toolchains.get(key);
     CcToolchainProvider ccToolchainProvider;
 
@@ -74,8 +97,21 @@ public class CcToolchainSuite implements RuleConfiguredTargetFactory {
               transformedCpu,
               compiler,
               selectedCcToolchain);
+      StarlarkFunction getCcToolchainProvider =
+          (StarlarkFunction) ruleContext.getStarlarkDefinedBuiltin("get_cc_toolchain_provider");
+      ruleContext.initStarlarkRuleContext();
+      Object starlarkCcToolchainProvider =
+          ruleContext.callStarlarkOrThrowRuleError(
+              getCcToolchainProvider,
+              ImmutableList.of(
+                  /* ctx */ ruleContext.getStarlarkRuleContext(),
+                  /* attributes */ selectedAttributes,
+                  /* has_apple_fragment */ true),
+              ImmutableMap.of());
       ccToolchainProvider =
-          CcToolchainProviderHelper.getCcToolchainProvider(ruleContext, selectedAttributes);
+          starlarkCcToolchainProvider != Starlark.NONE
+              ? (CcToolchainProvider) starlarkCcToolchainProvider
+              : null;
 
       if (ccToolchainProvider == null) {
         // Skyframe restart
@@ -86,9 +122,7 @@ public class CcToolchainSuite implements RuleConfiguredTargetFactory {
     CcCommon.reportInvalidOptions(ruleContext, cppConfiguration, ccToolchainProvider);
 
     TemplateVariableInfo templateVariableInfo =
-        CcToolchain.createMakeVariableProvider(
-            ccToolchainProvider,
-            ruleContext.getRule().getLocation());
+        createMakeVariableProvider(ccToolchainProvider, ruleContext.getRule().getLocation());
 
     RuleConfiguredTargetBuilder builder =
         new RuleConfiguredTargetBuilder(ruleContext)
@@ -98,10 +132,32 @@ public class CcToolchainSuite implements RuleConfiguredTargetFactory {
             .addProvider(RunfilesProvider.simple(Runfiles.EMPTY));
 
     if (ccToolchainProvider.getLicensesProvider() != null) {
-      builder.add(LicensesProvider.class, ccToolchainProvider.getLicensesProvider());
+      builder.addNativeDeclaredProvider(ccToolchainProvider.getLicensesProvider());
     }
 
     return builder.build();
+  }
+
+  /**
+   * Returns the toolchains defined through a {@code LABEL_DICT_UNARY} attribute as a map from a
+   * string to a {@link TransitiveInfoCollection}.
+   */
+  private ImmutableMap<String, TransitiveInfoCollection> getToolchainsMap(RuleContext ruleContext) {
+    Preconditions.checkState(
+        ruleContext.attributes().has(TOOLCHAIN_ATTRIBUTE_NAME, BuildType.LABEL_DICT_UNARY));
+
+    ImmutableMap.Builder<String, TransitiveInfoCollection> result = ImmutableMap.builder();
+    Map<String, Label> dict =
+        ruleContext.attributes().get(TOOLCHAIN_ATTRIBUTE_NAME, BuildType.LABEL_DICT_UNARY);
+    ImmutableMap<Label, ConfiguredTarget> labelToDep =
+        ruleContext.getPrerequisiteConfiguredTargets(TOOLCHAIN_ATTRIBUTE_NAME).stream()
+            .collect(toImmutableMap(dep -> dep.getTargetLabel(), dep -> dep.getConfiguredTarget()));
+
+    for (Map.Entry<String, Label> entry : dict.entrySet()) {
+      result.put(entry.getKey(), Preconditions.checkNotNull(labelToDep.get(entry.getValue())));
+    }
+
+    return result.buildOrThrow();
   }
 
   private <T extends HasCcToolchainLabel> T selectCcToolchain(
@@ -112,7 +168,7 @@ public class CcToolchainSuite implements RuleConfiguredTargetFactory {
       Label selectedCcToolchain)
       throws RuleErrorException {
     T selectedAttributes = null;
-    for (TransitiveInfoCollection dep : ruleContext.getPrerequisiteMap("toolchains").values()) {
+    for (TransitiveInfoCollection dep : getToolchainsMap(ruleContext).values()) {
       T attributes = dep.get(providerType);
       if (attributes != null && attributes.getCcToolchainLabel().equals(selectedCcToolchain)) {
         selectedAttributes = attributes;

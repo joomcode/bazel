@@ -14,11 +14,14 @@
 package com.google.devtools.build.lib.analysis.starlark;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.AliasProvider;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
+import com.google.devtools.build.lib.analysis.PrerequisiteArtifacts;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.StructImpl;
@@ -35,6 +38,7 @@ import net.starlark.java.eval.EvalException;
 import net.starlark.java.eval.Printer;
 import net.starlark.java.eval.Starlark;
 import net.starlark.java.eval.StarlarkList;
+import net.starlark.java.syntax.Identifier;
 
 /** Information about attributes of a rule an aspect is applied to. */
 class StarlarkAttributesCollection implements StarlarkAttributesCollectionApi {
@@ -144,6 +148,22 @@ class StarlarkAttributesCollection implements StarlarkAttributesCollectionApi {
       this.context = ruleContext;
     }
 
+    static Dict<String, TransitiveInfoCollection> convertStringToLabelMap(
+        Map<String, Label> unconfiguredValue,
+        List<? extends TransitiveInfoCollection> prerequisites) {
+      Map<Label, TransitiveInfoCollection> prerequisiteMap = Maps.newHashMap();
+      for (TransitiveInfoCollection prereq : prerequisites) {
+        prerequisiteMap.put(AliasProvider.getDependencyLabel(prereq), prereq);
+      }
+
+      Dict.Builder<String, TransitiveInfoCollection> builder = Dict.builder();
+      for (var entry : unconfiguredValue.entrySet()) {
+        builder.put(entry.getKey(), prerequisiteMap.get(entry.getValue()));
+      }
+
+      return builder.buildImmutable();
+    }
+
     @SuppressWarnings("unchecked")
     public void addAttribute(Attribute a, Object val) {
       Type<?> type = a.getType();
@@ -160,10 +180,14 @@ class StarlarkAttributesCollection implements StarlarkAttributesCollectionApi {
         return;
       }
 
-      // TODO(b/140636597): Remove the LABEL_DICT_UNARY special case of this conditional
-      // LABEL_DICT_UNARY was previously not treated as a dependency-bearing type, and was put into
-      // Starlark as a Map<String, Label>; this special case preserves that behavior temporarily.
-      if (type.getLabelClass() != LabelClass.DEPENDENCY || type == BuildType.LABEL_DICT_UNARY) {
+      // Don't expose invalid attributes via the rule ctx.attr. Ordinarily, this case cannot happen,
+      // and currently only applies to subrule attributes
+      // TODO: b/293304174 - let subrules explicitly mark attributes as not-visible-to-starlark
+      if (!Identifier.isValid(skyname)) {
+        return;
+      }
+
+      if (type.getLabelClass() != LabelClass.DEPENDENCY) {
         // Attribute values should be type safe
         attrBuilder.put(skyname, Attribute.valueToStarlark(val));
         return;
@@ -203,10 +227,11 @@ class StarlarkAttributesCollection implements StarlarkAttributesCollectionApi {
           fileBuilder.put(skyname, Starlark.NONE);
         }
       }
+      NestedSet<Artifact> files =
+          PrerequisiteArtifacts.nestedSet(context.getRuleContext(), a.getName());
       filesBuilder.put(
           skyname,
-          StarlarkList.immutableCopyOf(
-              context.getRuleContext().getPrerequisiteArtifacts(a.getName()).list()));
+          files.isEmpty() ? StarlarkList.empty() : StarlarkList.lazyImmutable(files::toList));
 
       if (type == BuildType.LABEL && !a.getTransitionFactory().isSplit()) {
         Object prereq = context.getRuleContext().getPrerequisite(a.getName());
@@ -218,6 +243,11 @@ class StarlarkAttributesCollection implements StarlarkAttributesCollectionApi {
           || (type == BuildType.LABEL && a.getTransitionFactory().isSplit())) {
         List<?> allPrereq = context.getRuleContext().getPrerequisites(a.getName());
         attrBuilder.put(skyname, StarlarkList.immutableCopyOf(allPrereq));
+      } else if (type == BuildType.LABEL_DICT_UNARY) {
+        List<? extends TransitiveInfoCollection> allPrereq =
+            context.getRuleContext().getPrerequisites(a.getName());
+        attrBuilder.put(skyname, convertStringToLabelMap(
+            BuildType.LABEL_DICT_UNARY.cast(val), allPrereq));
       } else if (type == BuildType.LABEL_KEYED_STRING_DICT) {
         Dict.Builder<TransitiveInfoCollection, String> builder = Dict.builder();
         Map<Label, String> original = BuildType.LABEL_KEYED_STRING_DICT.cast(val);
@@ -227,17 +257,6 @@ class StarlarkAttributesCollection implements StarlarkAttributesCollectionApi {
           builder.put(prereq, original.get(AliasProvider.getDependencyLabel(prereq)));
         }
         attrBuilder.put(skyname, builder.buildImmutable());
-      } else if (type == BuildType.LABEL_DICT_UNARY) {
-        Map<Label, TransitiveInfoCollection> prereqsByLabel = new LinkedHashMap<>();
-        for (TransitiveInfoCollection target :
-            context.getRuleContext().getPrerequisites(a.getName())) {
-          prereqsByLabel.put(target.getLabel(), target);
-        }
-        ImmutableMap.Builder<String, TransitiveInfoCollection> attrValue = ImmutableMap.builder();
-        for (Map.Entry<String, Label> entry : ((Map<String, Label>) val).entrySet()) {
-          attrValue.put(entry.getKey(), prereqsByLabel.get(entry.getValue()));
-        }
-        attrBuilder.put(skyname, attrValue.buildOrThrow());
       } else {
         throw new IllegalArgumentException(
             "Can't transform attribute "

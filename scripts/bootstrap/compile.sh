@@ -25,21 +25,18 @@ fi
 
 # Parse third_party/googleapis/BUILD.bazel to find the proto files we need to compile from googleapis
 GOOGLE_API_PROTOS="$(grep -o '".*\.proto"' third_party/googleapis/BUILD.bazel | sed 's/"//g' | sed 's|^|third_party/googleapis/|g')"
-PROTO_FILES=$(find third_party/remoteapis ${GOOGLE_API_PROTOS} third_party/pprof src/main/protobuf src/main/java/com/google/devtools/build/lib/buildeventstream/proto src/main/java/com/google/devtools/build/skyframe src/main/java/com/google/devtools/build/lib/skyframe/proto src/main/java/com/google/devtools/build/lib/bazel/debug src/main/java/com/google/devtools/build/lib/starlarkdebug/proto src/main/java/com/google/devtools/build/lib/packages/metrics/package_metrics.proto -name "*.proto")
+PROTO_FILES=$(find third_party/remoteapis ${GOOGLE_API_PROTOS} third_party/pprof src/main/protobuf src/main/java/com/google/devtools/build/lib/buildeventstream/proto src/main/java/com/google/devtools/build/skyframe src/main/java/com/google/devtools/build/lib/skyframe/proto src/main/java/com/google/devtools/build/lib/bazel/debug src/main/java/com/google/devtools/build/lib/starlarkdebug/proto src/main/java/com/google/devtools/build/lib/packages/metrics/package_load_metrics.proto -name "*.proto")
 # For protobuf jars, derived/jars/com_google_protobuf/java/core/libcore.jar must be in front of derived/jars/com_google_protobuf/java/core/liblite.jar, so we sort jars here
-LIBRARY_JARS=$(find $ADDITIONAL_JARS third_party -name '*.jar' | sort | grep -Fv JavaBuilder | grep -Fv third_party/guava/guava | grep -ve 'third_party/grpc/grpc.*jar' | grep -Fv third_party/netty_tcnative | tr "\n" " ")
-GRPC_JAVA_VERSION=1.47.0
-GRPC_LIBRARY_JARS=$(find third_party/grpc -name '*.jar' | grep -e ".*${GRPC_JAVA_VERSION}.*jar" | tr "\n" " ")
-GUAVA_VERSION=31.1
-GUAVA_JARS=$(find third_party/guava -name '*.jar' | grep -e ".*${GUAVA_VERSION}.*jar" | tr "\n" " ")
-LIBRARY_JARS="${LIBRARY_JARS} ${GRPC_LIBRARY_JARS} ${GUAVA_JARS}"
+LIBRARY_JARS=$(find $ADDITIONAL_JARS -name '*.jar' | sort | grep -Fv JavaBuilder | tr "\n" " ")
+MAVEN_JARS=$(find "derived/maven" -name '*.jar' | grep -Fv netty-tcnative | tr "\n" " ")
+LIBRARY_JARS="${LIBRARY_JARS} ${MAVEN_JARS}"
 
-DIRS=$(echo src/{java_tools/singlejar/java/com/google/devtools/build/zip,main/java} tools/java/runfiles ${OUTPUT_DIR}/src)
+DIRS=$(echo src/{java_tools/singlejar/java/com/google/devtools/build/zip,main/java,tools/starlark/java} tools/java/runfiles ${OUTPUT_DIR}/src)
 # Exclude source files that are not needed for Bazel itself, which avoids dependencies like truth.
 EXCLUDE_FILES="src/java_tools/buildjar/java/com/google/devtools/build/buildjar/javac/testing/* src/main/java/com/google/devtools/build/lib/collect/nestedset/NestedSetCodecTestUtils.java"
 # Exclude whole directories under the bazel src tree that bazel itself
 # doesn't depend on.
-EXCLUDE_DIRS="src/main/java/com/google/devtools/build/skydoc src/main/java/com/google/devtools/build/docgen tools/java/runfiles/testing src/main/java/com/google/devtools/build/lib/skyframe/serialization/testutils src/main/java/com/google/devtools/common/options/testing"
+EXCLUDE_DIRS="src/main/java/com/google/devtools/build/skydoc src/main/java/com/google/devtools/build/docgen tools/java/runfiles/testing src/main/java/com/google/devtools/build/lib/skyframe/serialization/testutils src/main/java/com/google/devtools/common/options/testing src/main/java/com/google/devtools/build/lib/testing"
 for d in $EXCLUDE_DIRS ; do
   for f in $(find $d -type f) ; do
     EXCLUDE_FILES+=" $f"
@@ -157,11 +154,16 @@ function create_deploy_jar() {
   local output=$3
   shift 3
   local packages=""
+  # Only keep the services subdirectory of META-INF (needed for AutoService).
+  for i in $output/classes/META-INF/*; do
+    local package=$(basename $i)
+    if [[ "$package" != "services" ]]; then
+      rm -r "$i"
+    fi
+  done
   for i in $output/classes/*; do
     local package=$(basename $i)
-    if [[ "$package" != "META-INF" ]]; then
-      packages="$packages -C $output/classes $package"
-    fi
+    packages="$packages -C $output/classes $package"
   done
 
   log "Creating $name.jar..."
@@ -172,7 +174,7 @@ function create_deploy_jar() {
 HOW_TO_BOOTSTRAP='
 
 --------------------------------------------------------------------------------
-NOTE: This failure is likely occuring if you are trying to bootstrap bazel from
+NOTE: This failure is likely occurring if you are trying to bootstrap bazel from
 a developer checkout. Those checkouts do not include the generated output of
 the protoc compiler (as we prefer not to version generated files).
 
@@ -247,11 +249,14 @@ if [ -z "${BAZEL_SKIP_JAVA_COMPILATION}" ]; then
   done
 
   # Create the bazel_tools repository.
-  BAZEL_TOOLS_REPO=${OUTPUT_DIR}/embedded_tools
+  BAZEL_TOOLS_REPO=${OUTPUT_DIR}/archive/embedded_tools
   mkdir -p ${BAZEL_TOOLS_REPO}
   cat <<EOF >${BAZEL_TOOLS_REPO}/WORKSPACE
 workspace(name = 'bazel_tools')
 EOF
+
+  # Set up the MODULE.bazel file for `bazel_tools`
+  link_file "${PWD}/src/MODULE.tools" "${BAZEL_TOOLS_REPO}/MODULE.bazel"
 
   mkdir -p "${BAZEL_TOOLS_REPO}/src/conditions"
   link_file "${PWD}/src/conditions/BUILD.tools" \
@@ -307,17 +312,8 @@ EOF
   link_children "${PWD}" tools/python "${BAZEL_TOOLS_REPO}"
   link_children "${PWD}" tools "${BAZEL_TOOLS_REPO}"
 
-  # Set up @bazel_tools//platforms properly
-  mkdir -p ${BAZEL_TOOLS_REPO}/platforms
-  cp tools/platforms/BUILD.tools ${BAZEL_TOOLS_REPO}/platforms/BUILD
-
-  # Overwrite tools.WORKSPACE, this is only for the bootstrap binary
-  chmod u+w "${OUTPUT_DIR}/classes/com/google/devtools/build/lib/bazel/rules/tools.WORKSPACE"
-  cat <<EOF >${OUTPUT_DIR}/classes/com/google/devtools/build/lib/bazel/rules/tools.WORKSPACE
-local_repository(name = 'bazel_tools', path = '${BAZEL_TOOLS_REPO}')
-bind(name = "cc_toolchain", actual = "@bazel_tools//tools/cpp:default-toolchain")
-local_config_platform(name = 'local_config_platform')
-EOF
+  # Set up @maven properly
+  cp derived/maven/BUILD.vendor derived/maven/BUILD
 
   create_deploy_jar "libblaze" "com.google.devtools.build.lib.bazel.Bazel" \
       ${OUTPUT_DIR}
@@ -327,16 +323,14 @@ log "Creating Bazel install base..."
 ARCHIVE_DIR=${OUTPUT_DIR}/archive
 mkdir -p ${ARCHIVE_DIR}
 
-# Prepare @platforms local repository
-link_dir ${PWD}/platforms ${ARCHIVE_DIR}/platforms
-
 # Dummy build-runfiles (we can't compile C++ yet, so we can't have the real one)
 if [ "${PLATFORM}" = "windows" ]; then
   # We don't rely on runfiles trees on Windows
   cat <<'EOF' >${ARCHIVE_DIR}/build-runfiles${EXE_EXT}
 #!/bin/sh
-mkdir -p $2
-cp $1 $2/MANIFEST
+# Skip over --allow_relative.
+mkdir -p $3
+cp $2 $3/MANIFEST
 EOF
 else
   cat <<'EOF' >${ARCHIVE_DIR}/build-runfiles${EXE_EXT}
@@ -350,8 +344,9 @@ else
 # bootstrap version of Bazel, but we'd still need a shell wrapper around it, so
 # it's not clear whether that would be a win over a few lines of Lovecraftian
 # code)
-MANIFEST="$1"
-TREE="$2"
+# Skip over --allow_relative.
+MANIFEST="$2"
+TREE="$3"
 
 rm -fr "$TREE"
 mkdir -p "$TREE"
@@ -413,7 +408,7 @@ cp $OUTPUT_DIR/libblaze.jar ${ARCHIVE_DIR}
 # TODO(b/28965185): Remove when xcode-locator is no longer required in embedded_binaries.
 log "Compiling xcode-locator..."
 if [[ $PLATFORM == "darwin" ]]; then
-  run /usr/bin/xcrun --sdk macosx clang -mmacosx-version-min=10.9 -fobjc-arc -framework CoreServices -framework Foundation -o ${ARCHIVE_DIR}/xcode-locator tools/osx/xcode_locator.m
+  run /usr/bin/xcrun --sdk macosx clang -mmacosx-version-min=10.13 -fobjc-arc -framework CoreServices -framework Foundation -o ${ARCHIVE_DIR}/xcode-locator tools/osx/xcode_locator.m
 else
   cp tools/osx/xcode_locator_stub.sh ${ARCHIVE_DIR}/xcode-locator
 fi
@@ -445,6 +440,7 @@ function run_bazel_jar() {
       -XX:+HeapDumpOnOutOfMemoryError -Xverify:none -Dfile.encoding=ISO-8859-1 \
       -XX:HeapDumpPath=${OUTPUT_DIR} \
       -Djava.util.logging.config.file=${OUTPUT_DIR}/javalog.properties \
+      --add-opens java.base/java.lang=ALL-UNNAMED \
       ${JNI_FLAGS} \
       -jar ${ARCHIVE_DIR}/libblaze.jar \
       --batch \

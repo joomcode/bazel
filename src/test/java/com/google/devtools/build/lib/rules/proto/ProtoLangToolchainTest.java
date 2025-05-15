@@ -17,15 +17,18 @@ package com.google.devtools.build.lib.rules.proto;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.StarlarkInfo;
+import com.google.devtools.build.lib.packages.StarlarkProvider;
+import com.google.devtools.build.lib.packages.StructImpl;
 import com.google.devtools.build.lib.packages.util.MockProtoSupport;
 import com.google.devtools.build.lib.testutil.TestConstants;
-import com.google.devtools.build.lib.vfs.PathFragment;
+import net.starlark.java.syntax.Location;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -36,7 +39,6 @@ import org.junit.runners.JUnit4;
 public class ProtoLangToolchainTest extends BuildViewTestCase {
   @Before
   public void setUp() throws Exception {
-    MockProtoSupport.setupWorkspace(scratch);
     MockProtoSupport.setup(mockToolsConfig);
     useConfiguration("--protocopt=--myflag");
     invalidatePackages();
@@ -98,7 +100,8 @@ public class ProtoLangToolchainTest extends BuildViewTestCase {
   }
 
   @Test
-  public void protoToolchain_setProtoCompiler() throws Exception {
+  public void protoToolchainResolution_enabled() throws Exception {
+    setBuildLanguageOptions("--incompatible_enable_proto_toolchain_resolution");
     scratch.file(
         "third_party/x/BUILD",
         "licenses(['unencumbered'])",
@@ -106,9 +109,7 @@ public class ProtoLangToolchainTest extends BuildViewTestCase {
         "cc_library(name = 'runtime', srcs = ['runtime.cc'])",
         "filegroup(name = 'descriptors', srcs = ['metadata.proto', 'descriptor.proto'])",
         "filegroup(name = 'any', srcs = ['any.proto'])",
-        "proto_library(name = 'denied', srcs = [':descriptors', ':any'])",
-        "cc_binary(name = 'compiler')");
-
+        "proto_library(name = 'denied', srcs = [':descriptors', ':any'])");
     scratch.file(
         "foo/BUILD",
         TestConstants.LOAD_PROTO_LANG_TOOLCHAIN,
@@ -121,14 +122,14 @@ public class ProtoLangToolchainTest extends BuildViewTestCase {
         "    runtime = '//third_party/x:runtime',",
         "    progress_message = 'Progress Message %{label}',",
         "    mnemonic = 'MyMnemonic',",
-        "    proto_compiler = '//third_party/x:compiler',",
         ")");
 
+    update(ImmutableList.of("//foo:toolchain"), false, 1, true, new EventBus());
     ProtoLangToolchainProvider toolchain =
         ProtoLangToolchainProvider.get(getConfiguredTarget("//foo:toolchain"));
 
     validateProtoLangToolchain(toolchain);
-    validateProtoCompiler(toolchain, "//third_party/x:compiler");
+    validateProtoCompiler(toolchain, ProtoConstants.DEFAULT_PROTOC_LABEL);
   }
 
   @Test
@@ -232,12 +233,22 @@ public class ProtoLangToolchainTest extends BuildViewTestCase {
     FilesToRunProvider protoCompiler =
         getConfiguredTarget("//net/proto2/compiler/public:protocol_compiler")
             .getProvider(FilesToRunProvider.class);
-    ImmutableList<ProtoSource> providedProtoSources =
+    StarlarkProvider provider =
+        StarlarkProvider.builder(Location.BUILTIN)
+            .setExported(
+                new StarlarkProvider.Key(
+                    Label.parseCanonicalUnchecked("@_builtins//:common/proto/protoinfo.bzl"),
+                    "ProtoSourceInfo"))
+            .build();
+    ImmutableList<StructImpl> providedProtoSources =
         ImmutableList.of(
-            new ProtoSource(
-                getSourceArtifact("a.proto"),
-                getSourceArtifact("_virtual_imports/b/a.proto"),
-                PathFragment.create("b")));
+            StarlarkInfo.create(
+                provider,
+                ImmutableMap.of(
+                    "original_source_file", getSourceArtifact("a.proto"),
+                    "source_file", getSourceArtifact("_virtual_imports/b/a.proto"),
+                    "proto_path", "b"),
+                Location.BUILTIN));
     StarlarkInfo starlarkProvider =
         ProtoLangToolchainProvider.create(
             /* outReplacementFormatFlag= */ "outReplacementFormatFlag",

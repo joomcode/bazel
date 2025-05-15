@@ -19,6 +19,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import com.google.common.collect.Collections2;
 import com.google.devtools.build.lib.analysis.BuildSettingProvider;
 import com.google.devtools.build.lib.analysis.ConfiguredAspectFactory;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.RequiredConfigFragmentsProvider;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
@@ -83,7 +84,7 @@ public final class RequiredFragmentsUtil {
       BuildConfigurationValue configuration,
       FragmentClassSet universallyRequiredFragments,
       ConfigConditions configConditions,
-      Iterable<ConfiguredTargetAndData> prerequisites) {
+      Iterable<ConfiguredTarget> prerequisites) {
     IncludeConfigFragmentsEnum mode = getRequiredFragmentsMode(configuration);
     if (mode == IncludeConfigFragmentsEnum.OFF) {
       return null;
@@ -105,7 +106,12 @@ public final class RequiredFragmentsUtil {
           .addRuleImplSpecificRequiredConfigFragments(requiredFragments, attributes, configuration);
     }
     addRequiredFragmentsFromRuleTransitions(
-        requiredFragments, target, attributes, configuration.getBuildOptionDetails());
+        configConditions,
+        configuration.checksum(),
+        requiredFragments,
+        target,
+        attributes,
+        configuration.getBuildOptionDetails());
 
     // We consider build settings (which are both targets and configuration) to require themselves.
     if (target.isBuildSetting()) {
@@ -137,7 +143,7 @@ public final class RequiredFragmentsUtil {
       BuildConfigurationValue configuration,
       FragmentClassSet universallyRequiredFragments,
       ConfigConditions configConditions,
-      Iterable<ConfiguredTargetAndData> prerequisites) {
+      Iterable<ConfiguredTarget> prerequisites) {
     IncludeConfigFragmentsEnum mode = getRequiredFragmentsMode(configuration);
     if (mode == IncludeConfigFragmentsEnum.OFF) {
       return null;
@@ -167,7 +173,7 @@ public final class RequiredFragmentsUtil {
       FragmentClassSet universallyRequiredFragments,
       ConfigurationFragmentPolicy configurationFragmentPolicy,
       ConfigConditions configConditions,
-      Iterable<ConfiguredTargetAndData> prerequisites) {
+      Iterable<ConfiguredTarget> prerequisites) {
     RequiredConfigFragmentsProvider.Builder requiredFragments =
         RequiredConfigFragmentsProvider.builder();
 
@@ -215,6 +221,8 @@ public final class RequiredFragmentsUtil {
    * because the child's properties determine that dependency.
    */
   private static void addRequiredFragmentsFromRuleTransitions(
+      ConfigConditions configConditions,
+      String configHash,
       RequiredConfigFragmentsProvider.Builder requiredFragments,
       Rule target,
       ConfiguredAttributeMapper attributeMap,
@@ -223,7 +231,7 @@ public final class RequiredFragmentsUtil {
       target
           .getRuleClassObject()
           .getTransitionFactory()
-          .create(RuleTransitionData.create(target))
+          .create(RuleTransitionData.create(target, configConditions.asProviders(), configHash))
           .addRequiredFragments(requiredFragments, optionDetails);
     }
     // We don't set the execution platform in this data because a) that doesn't affect which
@@ -266,10 +274,10 @@ public final class RequiredFragmentsUtil {
 
   private static void addTransitivelyRequiredFragments(
       RequiredConfigFragmentsProvider.Builder requiredFragments,
-      Iterable<ConfiguredTargetAndData> prerequisites) {
-    for (ConfiguredTargetAndData prereq : prerequisites) {
+      Iterable<ConfiguredTarget> prerequisites) {
+    for (ConfiguredTarget prereq : prerequisites) {
       RequiredConfigFragmentsProvider depProvider =
-          prereq.getConfiguredTarget().getProvider(RequiredConfigFragmentsProvider.class);
+          prereq.getProvider(RequiredConfigFragmentsProvider.class);
       if (depProvider != null) {
         requiredFragments.merge(depProvider);
       }
@@ -286,10 +294,9 @@ public final class RequiredFragmentsUtil {
    */
   private static void addStarlarkBuildSettings(
       RequiredConfigFragmentsProvider.Builder requiredFragments,
-      Iterable<ConfiguredTargetAndData> prerequisites) {
-    for (ConfiguredTargetAndData prereq : prerequisites) {
-      BuildSettingProvider buildSettingProvider =
-          prereq.getConfiguredTarget().getProvider(BuildSettingProvider.class);
+      Iterable<ConfiguredTarget> prerequisites) {
+    for (ConfiguredTarget prereq : prerequisites) {
+      BuildSettingProvider buildSettingProvider = prereq.getProvider(BuildSettingProvider.class);
       if (buildSettingProvider != null) {
         requiredFragments.addStarlarkOption(buildSettingProvider.getLabel());
       }

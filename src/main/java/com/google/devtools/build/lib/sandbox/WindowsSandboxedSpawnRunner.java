@@ -71,7 +71,7 @@ final class WindowsSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
 
     SandboxInputs readablePaths =
         helpers.processInputFiles(
-            context.getInputMapping(PathFragment.EMPTY_FRAGMENT),
+            context.getInputMapping(PathFragment.EMPTY_FRAGMENT, /* willAccessRepeatedly= */ true),
             execRoot);
 
     ImmutableSet.Builder<Path> writablePaths = ImmutableSet.builder();
@@ -101,7 +101,8 @@ final class WindowsSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
       commandLineBuilder.setTimeout(timeout);
     }
 
-    return new WindowsSandboxedSpawn(execRoot, environment, commandLineBuilder.build());
+    return new WindowsSandboxedSpawn(
+        execRoot, environment, commandLineBuilder.build(), spawn.getMnemonic());
   }
 
   private static Path createActionTemp(Path execRoot) throws IOException {

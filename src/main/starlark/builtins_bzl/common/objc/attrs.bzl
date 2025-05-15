@@ -15,12 +15,9 @@
 """Attributes common to Objc rules"""
 
 load("@_builtins//:common/objc/semantics.bzl", "semantics")
+load(":common/cc/cc_info.bzl", "CcInfo")
 
-CcInfo = _builtins.toplevel.CcInfo
-AppleDynamicFrameworkInfo = _builtins.toplevel.apple_common.AppleDynamicFramework
-TemplateVariableInfo = _builtins.toplevel.platform_common.TemplateVariableInfo
-
-# Private attribute required by `objc_internal.expand_toolchain_and_ctx_variables`
+# Private attribute required by `objc_internal.expand_and_tokenize`
 _CC_TOOLCHAIN_RULE = {
     "_cc_toolchain": attr.label(
         default = "@" + semantics.get_repo() + "//tools/cpp:current_cc_toolchain",
@@ -29,40 +26,15 @@ _CC_TOOLCHAIN_RULE = {
 
 _COMPILING_RULE = {
     "srcs": attr.label_list(
-        allow_files = [
-            # NON_CPP_SOURCES
-            ".m",
-            ".c",
-            # CPP_SOURCES
-            ".cc",
-            ".cpp",
-            ".mm",
-            ".cxx",
-            ".C",
-            # ASSEMBLY_SOURCES
-            ".s",
-            ".S",
-            ".asm",
-            # OBJECT_FILE_SOURCES
-            ".o",
-            # HEADERS
-            ".h",
-            ".inc",
-            ".hpp",
-            ".hh",
-        ],
+        allow_files = True,
         flags = ["DIRECT_COMPILE_TIME_INPUT"],
     ),
     "non_arc_srcs": attr.label_list(
-        allow_files = [".m", ".mm"],
+        allow_files = True,
         flags = ["DIRECT_COMPILE_TIME_INPUT"],
     ),
     "pch": attr.label(
         allow_single_file = [".pch"],
-        flags = ["DIRECT_COMPILE_TIME_INPUT"],
-    ),
-    "runtime_deps": attr.label_list(
-        providers = [AppleDynamicFrameworkInfo],
         flags = ["DIRECT_COMPILE_TIME_INPUT"],
     ),
     "defines": attr.string_list(),
@@ -87,16 +59,6 @@ _COMPILE_DEPENDENCY_RULE = {
     "sdk_includes": attr.string_list(),
     "deps": attr.label_list(
         providers = [CcInfo],
-        flags = ["DIRECT_COMPILE_TIME_INPUT"],
-    ),
-}
-
-_INCLUDE_SCANNING_RULE = {
-    "_grep_includes": attr.label(
-        allow_single_file = True,
-        cfg = "exec",
-        default = "@" + semantics.get_repo() + "//tools/cpp:grep-includes",
-        executable = True,
     ),
 }
 
@@ -110,24 +72,8 @@ _COPTS_RULE = {
     "copts": attr.string_list(),
 }
 
-_XCRUN_RULE = {
-    "_xcrunwrapper": attr.label(
-        cfg = "exec",
-        default = "@" + semantics.get_repo() + "//tools/objc:xcrunwrapper",
-        executable = True,
-    ),
+_ALWAYSLINK_RULE = {
     "alwayslink": attr.bool(),
-    "_xcode_config": attr.label(
-        default = configuration_field(
-            fragment = "apple",
-            name = "xcode_config_label",
-        ),
-    ),
-}
-
-_PLATFORM_RULE = {
-    "platform_type": attr.string(mandatory = True),
-    "minimum_os_version": attr.string(),
 }
 
 def _union(*dictionaries):
@@ -138,13 +84,11 @@ def _union(*dictionaries):
 
 common_attrs = struct(
     union = _union,
+    ALWAYSLINK_RULE = _ALWAYSLINK_RULE,
     CC_TOOLCHAIN_RULE = _CC_TOOLCHAIN_RULE,
     COMPILING_RULE = _COMPILING_RULE,
     COMPILE_DEPENDENCY_RULE = _COMPILE_DEPENDENCY_RULE,
-    INCLUDE_SCANNING_RULE = _INCLUDE_SCANNING_RULE,
-    SDK_FRAMEWORK_DEPENDER_RULE = _SDK_FRAMEWORK_DEPENDER_RULE,
     COPTS_RULE = _COPTS_RULE,
-    XCRUN_RULE = _XCRUN_RULE,
     LICENSES = semantics.get_licenses_attr(),
-    PLATFORM_RULE = _PLATFORM_RULE,
+    SDK_FRAMEWORK_DEPENDER_RULE = _SDK_FRAMEWORK_DEPENDER_RULE,
 )

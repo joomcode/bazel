@@ -14,14 +14,16 @@
 
 package com.google.devtools.build.lib.actions;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.devtools.build.lib.analysis.config.BuildConfigurationValue.RunfileSymlinksMode;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.SerializationConstant;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.Map;
+import javax.annotation.Nullable;
 
 /** Empty implementation of RunfilesSupplier */
 public final class EmptyRunfilesSupplier implements RunfilesSupplier {
@@ -32,18 +34,8 @@ public final class EmptyRunfilesSupplier implements RunfilesSupplier {
   private EmptyRunfilesSupplier() {}
 
   @Override
-  public boolean equals(Object other) {
-    return (other instanceof EmptyRunfilesSupplier);
-  }
-
-  @Override
-  public int hashCode() {
-    return 0;
-  }
-
-  @Override
   public NestedSet<Artifact> getArtifacts() {
-    return NestedSetBuilder.<Artifact>stableOrder().build();
+    return NestedSetBuilder.emptySet(Order.STABLE_ORDER);
   }
 
   @Override
@@ -57,8 +49,9 @@ public final class EmptyRunfilesSupplier implements RunfilesSupplier {
   }
 
   @Override
-  public ImmutableList<Artifact> getManifests() {
-    return ImmutableList.<Artifact>of();
+  @Nullable
+  public RunfileSymlinksMode getRunfileSymlinksMode(PathFragment runfilesDir) {
+    return null;
   }
 
   @Override
@@ -67,7 +60,12 @@ public final class EmptyRunfilesSupplier implements RunfilesSupplier {
   }
 
   @Override
-  public boolean isRunfileLinksEnabled(PathFragment runfilesDir) {
-    return false;
+  public RunfilesSupplier withOverriddenRunfilesDir(PathFragment newRunfilesDir) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public Map<Artifact, RunfilesTree> getRunfilesTreesForLogging() {
+    return ImmutableMap.of();
   }
 }

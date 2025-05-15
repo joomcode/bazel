@@ -18,14 +18,16 @@ package com.google.devtools.build.lib.bazel.bzlmod;
 import com.google.auto.value.AutoValue;
 import com.google.auto.value.extension.memoized.Memoized;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Interner;
+import com.google.common.collect.ImmutableSet;
+import com.google.devtools.build.lib.bazel.repository.downloader.Checksum;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
-import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.skyframe.SkyFunctions;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
+import java.util.Optional;
 import javax.annotation.Nullable;
 
 /** The result of {@link ModuleFileFunction}. */
@@ -38,14 +40,22 @@ public abstract class ModuleFileValue implements SkyValue {
    * module might not match the one in the requesting {@link SkyKey} in certain circumstances (for
    * example, for the root module, or when non-registry overrides are in play.
    */
-  public abstract Module getModule();
+  public abstract InterimModule getModule();
+
+  /**
+   * Hashes of files obtained (or known to be missing) from registries while obtaining this module
+   * file.
+   */
+  public abstract ImmutableMap<String, Optional<Checksum>> getRegistryFileHashes();
 
   /** The {@link ModuleFileValue} for non-root modules. */
   @AutoValue
   public abstract static class NonRootModuleFileValue extends ModuleFileValue {
 
-    public static NonRootModuleFileValue create(Module module) {
-      return new AutoValue_ModuleFileValue_NonRootModuleFileValue(module);
+    public static NonRootModuleFileValue create(
+        InterimModule module,
+        ImmutableMap<String, Optional<Checksum>> registryFileHashes) {
+      return new AutoValue_ModuleFileValue_NonRootModuleFileValue(module, registryFileHashes);
     }
   }
 
@@ -68,12 +78,28 @@ public abstract class ModuleFileValue implements SkyValue {
     public abstract ImmutableMap<RepositoryName, String>
         getNonRegistryOverrideCanonicalRepoNameLookup();
 
+    /**
+     * The set of relative paths to the root MODULE.bazel file itself and all its transitive
+     * includes.
+     */
+    public abstract ImmutableSet<PathFragment> getModuleFilePaths();
+
+    @Override
+    public ImmutableMap<String, Optional<Checksum>> getRegistryFileHashes() {
+      // The root module is not obtained from a registry.
+      return ImmutableMap.of();
+    }
+
     public static RootModuleFileValue create(
-        Module module,
+        InterimModule module,
         ImmutableMap<String, ModuleOverride> overrides,
-        ImmutableMap<RepositoryName, String> nonRegistryOverrideCanonicalRepoNameLookup) {
+        ImmutableMap<RepositoryName, String> nonRegistryOverrideCanonicalRepoNameLookup,
+        ImmutableSet<PathFragment> moduleFilePaths) {
       return new AutoValue_ModuleFileValue_RootModuleFileValue(
-          module, overrides, nonRegistryOverrideCanonicalRepoNameLookup);
+          module,
+          overrides,
+          nonRegistryOverrideCanonicalRepoNameLookup,
+          moduleFilePaths);
     }
   }
 
@@ -84,8 +110,8 @@ public abstract class ModuleFileValue implements SkyValue {
   /** {@link SkyKey} for {@link ModuleFileValue} computation. */
   @AutoCodec
   @AutoValue
-  abstract static class Key implements SkyKey {
-    private static final Interner<Key> interner = BlazeInterners.newWeakInterner();
+  public abstract static class Key implements SkyKey {
+    private static final SkyKeyInterner<Key> interner = SkyKey.newInterner();
 
     abstract ModuleKey getModuleKey();
 
@@ -105,5 +131,10 @@ public abstract class ModuleFileValue implements SkyValue {
     @Memoized
     @Override
     public abstract int hashCode();
+
+    @Override
+    public SkyKeyInterner<Key> getSkyKeyInterner() {
+      return interner;
+    }
   }
 }

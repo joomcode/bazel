@@ -137,9 +137,9 @@ public final class ActionExecutedEvent implements BuildEventWithConfiguration {
   @Override
   public Collection<BuildEvent> getConfigurations() {
     if (action.getOwner() != null) {
-      BuildEvent configuration = action.getOwner().getConfiguration();
+      BuildEvent configuration = action.getOwner().getBuildConfigurationEvent();
       if (configuration == null) {
-        configuration = new NullConfiguration();
+        configuration = NullConfiguration.INSTANCE;
       }
       return ImmutableList.of(configuration);
     } else {
@@ -172,7 +172,10 @@ public final class ActionExecutedEvent implements BuildEventWithConfiguration {
     if (exception == null) {
       localFiles.add(
           new LocalFile(
-              primaryOutput, LocalFileType.OUTPUT, outputArtifact, primaryOutputMetadata));
+              primaryOutput,
+              LocalFileType.forArtifact(outputArtifact, primaryOutputMetadata),
+              outputArtifact,
+              primaryOutputMetadata));
     }
     return localFiles.build();
   }
@@ -216,9 +219,9 @@ public final class ActionExecutedEvent implements BuildEventWithConfiguration {
       actionBuilder.setLabel(action.getOwner().getLabel().toString());
     }
     if (action.getOwner() != null) {
-      BuildEvent configuration = action.getOwner().getConfiguration();
+      BuildEvent configuration = action.getOwner().getBuildConfigurationEvent();
       if (configuration == null) {
-        configuration = new NullConfiguration();
+        configuration = NullConfiguration.INSTANCE;
       }
       actionBuilder.setConfiguration(configuration.getEventId().getConfiguration());
     }

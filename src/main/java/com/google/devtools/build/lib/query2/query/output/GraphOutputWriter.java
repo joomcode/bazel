@@ -25,6 +25,7 @@ import com.google.devtools.build.lib.graph.Digraph;
 import com.google.devtools.build.lib.graph.DotOutputVisitor;
 import com.google.devtools.build.lib.graph.LabelSerializer;
 import com.google.devtools.build.lib.graph.Node;
+import com.google.devtools.build.lib.packages.LabelPrinter;
 import com.google.devtools.build.lib.packages.Target;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
@@ -54,7 +55,7 @@ public final class GraphOutputWriter<T> {
      * <p>This is not the same as a build {@link Label}. This is just the text associated with a
      * node in a GraphViz graph.
      */
-    String getLabel(Node<T> node);
+    String getLabel(Node<T> node, LabelPrinter labelPrinter);
 
     /** Returns a comparator for the build graph nodes that form the payloads of GraphViz nodes. */
     Comparator<T> comparator();
@@ -67,6 +68,7 @@ public final class GraphOutputWriter<T> {
   private final int maxConditionalEdges;
   private final boolean mergeEquivalentNodes;
   private final Ordering<Node<T>> nodeComparator;
+  private final LabelPrinter labelPrinter;
 
   private static final int RESERVED_LABEL_CHARS = "\\n...and 9999999 more items".length();
 
@@ -90,13 +92,15 @@ public final class GraphOutputWriter<T> {
       boolean sortLabels,
       int maxLabelSize,
       int maxConditionalEdges,
-      boolean mergeEquivalentNodes) {
+      boolean mergeEquivalentNodes,
+      LabelPrinter labelPrinter) {
     this.nodeReader = nodeReader;
     this.lineTerminator = lineTerminator;
     this.sortLabels = sortLabels;
     this.maxLabelSize = maxLabelSize;
     this.maxConditionalEdges = maxConditionalEdges;
     this.mergeEquivalentNodes = mergeEquivalentNodes;
+    this.labelPrinter = labelPrinter;
     nodeComparator = Ordering.from(nodeReader.comparator()).onResultOf(Node::getLabel);
   }
 
@@ -120,7 +124,7 @@ public final class GraphOutputWriter<T> {
   private void outputUnfactored(
       Digraph<T> graph, @Nullable ConditionalEdges conditionalEdges, PrintWriter out) {
     graph.visitNodesBeforeEdges(
-        new DotOutputVisitor<T>(out, nodeReader::getLabel) {
+        new DotOutputVisitor<T>(out, node -> nodeReader.getLabel(node, labelPrinter)) {
           @Override
           public void beginVisit() {
             super.beginVisit();
@@ -180,7 +184,7 @@ public final class GraphOutputWriter<T> {
           StringBuilder buf = new StringBuilder();
           int count = 0;
           for (Node<T> eqNode : node.getLabel()) {
-            String labelString = nodeReader.getLabel(eqNode);
+            String labelString = nodeReader.getLabel(eqNode, labelPrinter);
             if (!firstItem) {
               buf.append("\\n");
 

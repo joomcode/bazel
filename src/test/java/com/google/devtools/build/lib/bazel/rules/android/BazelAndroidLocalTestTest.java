@@ -34,13 +34,13 @@ public abstract class BazelAndroidLocalTestTest extends AndroidLocalTestTest {
   // TODO(b/161709111): With platforms, all tests fail with
   // "no attribute `$android_sdk_toolchain_type`" on AspectAwareAttributeMapper.
   /** Use platform-based toolchain resolution. */
-  /*  @RunWith(JUnit4.class)
-  public static class WithPlatforms extends GoogleAndroidLocalTestTest {
+  @RunWith(JUnit4.class)
+  public static class WithPlatforms extends BazelAndroidLocalTestTest {
     @Override
     protected boolean platformBasedToolchains() {
       return true;
     }
-  } */
+  }
 
   @Before
   @Override
@@ -67,16 +67,6 @@ public abstract class BazelAndroidLocalTestTest extends AndroidLocalTestTest {
         "    srcs = ['test.java', ':jar'])",
         "filegroup(name = 'jar',",
         "    srcs = ['lib.jar'])");
-  }
-
-  @Test
-  public void testCoverageThrowsError() throws Exception {
-    useConfiguration("--collect_code_coverage");
-    checkError("java/test",
-        "test",
-        "android_local_test does not yet support coverage",
-        "android_local_test(name = 'test',",
-        "    srcs = ['test.java'])");
   }
 
   @Test

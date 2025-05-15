@@ -30,7 +30,6 @@ import com.google.devtools.build.lib.analysis.actions.SymlinkAction;
 import com.google.devtools.build.lib.analysis.test.InstrumentedFilesCollector;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import javax.annotation.Nullable;
 
@@ -70,7 +69,7 @@ public class ShBinary implements RuleConfiguredTargetFactory {
             ruleContext.getConfiguration().legacyExternalRunfiles());
 
     Artifact mainExecutable =
-        (OS.getCurrent() == OS.WINDOWS) ? launcherForWindows(ruleContext, symlink, src) : symlink;
+        ruleContext.isExecutedOnWindows() ? launcherForWindows(ruleContext, symlink, src) : symlink;
     if (!symlink.equals(mainExecutable)) {
       filesToBuildBuilder.add(mainExecutable);
       runfilesBuilder.addArtifact(symlink);
@@ -103,7 +102,7 @@ public class ShBinary implements RuleConfiguredTargetFactory {
   }
 
   private static Artifact createWindowsExeLauncher(
-      RuleContext ruleContext, PathFragment shExecutable) throws RuleErrorException {
+      RuleContext ruleContext, PathFragment shExecutable, Artifact primaryOutput) {
     Artifact bashLauncher =
         ruleContext.getImplicitOutputArtifact(ruleContext.getTarget().getName() + ".exe");
 
@@ -115,6 +114,11 @@ public class ShBinary implements RuleConfiguredTargetFactory {
                 "symlink_runfiles_enabled",
                 ruleContext.getConfiguration().runfilesEnabled() ? "1" : "0")
             .addKeyValuePair("bash_bin_path", shExecutable.getPathString())
+            .addKeyValuePair(
+                "bash_file_rlocationpath",
+                PathFragment.create(ruleContext.getWorkspaceName())
+                    .getRelative(primaryOutput.getRunfilesPathString())
+                    .getPathString())
             .build();
 
     LauncherFileWriteAction.createAndRegister(ruleContext, bashLauncher, launchInfo);
@@ -137,7 +141,9 @@ public class ShBinary implements RuleConfiguredTargetFactory {
     }
 
     // TODO(b/234923262): Take exec_group into consideration when selecting sh tools
-    PathFragment shExecutable = ShToolchain.getPathOrError(ruleContext.getExecutionPlatform());
-    return createWindowsExeLauncher(ruleContext, shExecutable);
+    PathFragment shExecutable =
+        ShToolchain.getPathForPlatform(
+            ruleContext.getConfiguration(), ruleContext.getExecutionPlatform());
+    return createWindowsExeLauncher(ruleContext, shExecutable, primaryOutput);
   }
 }

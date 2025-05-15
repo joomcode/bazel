@@ -14,6 +14,7 @@
 
 package com.google.devtools.build.lib.authandtls;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import com.google.auth.Credentials;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.common.annotations.VisibleForTesting;
@@ -22,6 +23,7 @@ import com.google.common.base.Strings;
 import com.google.devtools.build.lib.authandtls.credentialhelper.CredentialHelperCredentials;
 import com.google.devtools.build.lib.authandtls.credentialhelper.CredentialHelperEnvironment;
 import com.google.devtools.build.lib.authandtls.credentialhelper.CredentialHelperProvider;
+import com.google.devtools.build.lib.authandtls.credentialhelper.GetCredentialsResponse;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.runtime.CommandLinePathFactory;
 import com.google.devtools.build.lib.vfs.FileSystem;
@@ -33,6 +35,7 @@ import io.grpc.auth.MoreCallCredentials;
 import io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.NegotiationType;
 import io.grpc.netty.NettyChannelBuilder;
+import io.netty.channel.EventLoopGroup;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollDomainSocketChannel;
 import io.netty.channel.epoll.EpollEventLoopGroup;
@@ -47,6 +50,7 @@ import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -160,18 +164,30 @@ public final class GoogleAuthUtils {
     }
   }
 
+  private static EventLoopGroup currentEventLoopGroup = null;
+
+  private static synchronized EventLoopGroup getEventLoopGroup() throws IOException {
+    if (currentEventLoopGroup == null) {
+      if (KQueue.isAvailable()) {
+        currentEventLoopGroup = new KQueueEventLoopGroup();
+      } else if (Epoll.isAvailable()) {
+        currentEventLoopGroup = new EpollEventLoopGroup();
+      } else {
+        throw new IOException("Creating event loop groups is unsupported on this platform");
+      }
+    }
+    return currentEventLoopGroup;
+  }
+
   private static NettyChannelBuilder newUnixNettyChannelBuilder(String target) throws IOException {
     DomainSocketAddress address = new DomainSocketAddress(target.replaceFirst("^unix:", ""));
-    NettyChannelBuilder builder = NettyChannelBuilder.forAddress(address);
+    NettyChannelBuilder builder =
+        NettyChannelBuilder.forAddress(address).eventLoopGroup(getEventLoopGroup());
     if (KQueue.isAvailable()) {
-      return builder
-          .channelType(KQueueDomainSocketChannel.class)
-          .eventLoopGroup(new KQueueEventLoopGroup());
+      return builder.channelType(KQueueDomainSocketChannel.class);
     }
     if (Epoll.isAvailable()) {
-      return builder
-          .channelType(EpollDomainSocketChannel.class)
-          .eventLoopGroup(new EpollEventLoopGroup());
+      return builder.channelType(EpollDomainSocketChannel.class);
     }
 
     throw new IOException("Unix domain sockets are unsupported on this platform");
@@ -235,6 +251,7 @@ public final class GoogleAuthUtils {
    */
   public static Credentials newCredentials(
       CredentialHelperEnvironment credentialHelperEnvironment,
+      Cache<URI, GetCredentialsResponse> credentialCache,
       CommandLinePathFactory commandLinePathFactory,
       FileSystem fileSystem,
       AuthAndTLSOptions authAndTlsOptions)
@@ -244,12 +261,12 @@ public final class GoogleAuthUtils {
     Preconditions.checkNotNull(fileSystem);
     Preconditions.checkNotNull(authAndTlsOptions);
 
-    Optional<Credentials> credentials = newGoogleCredentials(authAndTlsOptions);
+    Optional<Credentials> fallbackCredentials = newGoogleCredentials(authAndTlsOptions);
 
-    if (credentials.isEmpty()) {
+    if (fallbackCredentials.isEmpty()) {
       // Fallback to .netrc if it exists.
       try {
-        credentials =
+        fallbackCredentials =
             newCredentialsFromNetrc(credentialHelperEnvironment.getClientEnvironment(), fileSystem);
       } catch (IOException e) {
         // TODO(yannic): Make this fail the build.
@@ -263,8 +280,8 @@ public final class GoogleAuthUtils {
             commandLinePathFactory,
             authAndTlsOptions.credentialHelpers),
         credentialHelperEnvironment,
-        credentials,
-        authAndTlsOptions.credentialHelperCacheTimeout);
+        credentialCache,
+        fallbackCredentials);
   }
 
   /**
@@ -312,7 +329,7 @@ public final class GoogleAuthUtils {
         creds = creds.createScoped(authScopes);
       }
       return creds;
-    } catch (IOException e) {
+    } catch (Exception e) {
       String message = "Failed to init auth credentials: " + e.getMessage();
       throw new IOException(message, e);
     }
@@ -354,18 +371,17 @@ public final class GoogleAuthUtils {
     }
   }
 
-  @VisibleForTesting
   public static CredentialHelperProvider newCredentialHelperProvider(
       CredentialHelperEnvironment environment,
       CommandLinePathFactory pathFactory,
-      List<AuthAndTLSOptions.UnresolvedScopedCredentialHelper> helpers)
+      List<AuthAndTLSOptions.CredentialHelperOption> helpers)
       throws IOException {
     Preconditions.checkNotNull(environment);
     Preconditions.checkNotNull(pathFactory);
     Preconditions.checkNotNull(helpers);
 
     CredentialHelperProvider.Builder builder = CredentialHelperProvider.builder();
-    for (AuthAndTLSOptions.UnresolvedScopedCredentialHelper helper : helpers) {
+    for (AuthAndTLSOptions.CredentialHelperOption helper : helpers) {
       Optional<String> scope = helper.getScope();
       Path path = pathFactory.create(environment.getClientEnvironment(), helper.getPath());
       if (scope.isPresent()) {

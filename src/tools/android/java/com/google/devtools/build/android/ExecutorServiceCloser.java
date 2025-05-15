@@ -18,6 +18,7 @@ import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -36,11 +37,12 @@ final class ExecutorServiceCloser implements Closeable, ListeningExecutorService
   }
 
   @Override
-  public void close() throws IOException {
+  public void close() {
     List<Runnable> unfinishedTasks = executorService.shutdownNow();
     if (!unfinishedTasks.isEmpty()) {
-      throw new IOException(
-          "Shutting down the executor with unfinished tasks:" + unfinishedTasks.size());
+      throw new UncheckedIOException(
+          new IOException(
+              "Shutting down the executor with unfinished tasks:" + unfinishedTasks.size()));
     }
   }
 
@@ -51,20 +53,6 @@ final class ExecutorServiceCloser implements Closeable, ListeningExecutorService
 
   public static ExecutorServiceCloser createWith(ListeningExecutorService executorService) {
     return new ExecutorServiceCloser(executorService);
-  }
-
-  /**
-   * Creates a {@link ListeningExecutorService} with a sane sized thread pool based on our current
-   * metrics.
-   */
-  public static ListeningExecutorService createDefaultService() {
-    // The reported availableProcessors may be higher than the actual resources
-    // (on a shared system). On the other hand, a lot of the work is I/O, so it's not completely
-    // CPU bound. As a compromise, divide by 2 the reported availableProcessors.
-    int numThreads = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
-    final ListeningExecutorService executorService =
-        MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(numThreads));
-    return executorService;
   }
 
   // Delegate methods below

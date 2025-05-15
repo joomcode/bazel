@@ -50,7 +50,7 @@ import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 import com.google.devtools.build.lib.packages.TestSize;
 import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.packages.Type.ConversionException;
-import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skyframe.serialization.VisibleForSerialization;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.SerializationConstant;
 import com.google.devtools.build.lib.util.FileTypeSet;
 import javax.annotation.Nullable;
@@ -63,12 +63,12 @@ public class BaseRuleClasses {
 
   private BaseRuleClasses() {}
 
-  @SerializationConstant @AutoCodec.VisibleForSerialization
+  @SerializationConstant @VisibleForSerialization
   static final Attribute.ComputedDefault testonlyDefault =
       new Attribute.ComputedDefault() {
         @Override
         public Object getDefault(AttributeMap rule) {
-          return rule.getPackageDefaultTestOnly();
+          return rule.getPackageArgs().defaultTestOnly();
         }
 
         @Override
@@ -77,12 +77,12 @@ public class BaseRuleClasses {
         }
       };
 
-  @SerializationConstant @AutoCodec.VisibleForSerialization
+  @SerializationConstant @VisibleForSerialization
   static final Attribute.ComputedDefault deprecationDefault =
       new Attribute.ComputedDefault() {
         @Override
         public Object getDefault(AttributeMap rule) {
-          return rule.getPackageDefaultDeprecation();
+          return rule.getPackageArgs().defaultDeprecation();
         }
 
         @Override
@@ -91,7 +91,7 @@ public class BaseRuleClasses {
         }
       };
 
-  @SerializationConstant @AutoCodec.VisibleForSerialization
+  @SerializationConstant @VisibleForSerialization
   public static final Attribute.ComputedDefault TIMEOUT_DEFAULT =
       new Attribute.ComputedDefault() {
         @Override
@@ -112,6 +112,20 @@ public class BaseRuleClasses {
         }
       };
 
+  @SerializationConstant @VisibleForSerialization
+  public static final Attribute.ComputedDefault packageMetadataDefault =
+      new Attribute.ComputedDefault() {
+        @Override
+        public Object getDefault(AttributeMap rule) {
+          return rule.getPackageArgs().defaultPackageMetadata();
+        }
+
+        @Override
+        public boolean resolvableWithRawAttributes() {
+          return true;
+        }
+      };
+
   // TODO(b/65746853): provide a way to do this without passing the entire configuration
   /**
    * Implementation for the :action_listener attribute.
@@ -121,7 +135,7 @@ public class BaseRuleClasses {
    * they only run on the target configuration and should not operate on action_listeners and
    * extra_actions themselves (to avoid cycles).
    */
-  @SerializationConstant @AutoCodec.VisibleForSerialization @VisibleForTesting
+  @SerializationConstant @VisibleForSerialization @VisibleForTesting
   static final LabelListLateBoundDefault<?> ACTION_LISTENER =
       LabelListLateBoundDefault.fromTargetConfiguration(
           BuildConfigurationValue.class,
@@ -129,7 +143,7 @@ public class BaseRuleClasses {
 
   public static final String DEFAULT_COVERAGE_SUPPORT_VALUE = "//tools/test:coverage_support";
 
-  @SerializationConstant @AutoCodec.VisibleForSerialization
+  @SerializationConstant @VisibleForSerialization
   static final Resolver<TestConfiguration, Label> COVERAGE_SUPPORT_CONFIGURATION_RESOLVER =
       (rule, attributes, configuration) -> configuration.getCoverageSupport();
 
@@ -142,14 +156,17 @@ public class BaseRuleClasses {
   public static final String DEFAULT_COVERAGE_REPORT_GENERATOR_VALUE =
       "//tools/test:coverage_report_generator";
 
-  @SerializationConstant @AutoCodec.VisibleForSerialization
-  static final Resolver<TestConfiguration, Label> COVERAGE_REPORT_GENERATOR_CONFIGURATION_RESOLVER =
-      (rule, attributes, configuration) -> configuration.getCoverageReportGenerator();
+  @SerializationConstant @VisibleForSerialization
+  static final Resolver<CoverageConfiguration, Label>
+      COVERAGE_REPORT_GENERATOR_CONFIGURATION_RESOLVER =
+          (rule, attributes, configuration) -> configuration.reportGenerator();
 
-  public static LabelLateBoundDefault<TestConfiguration> coverageReportGeneratorAttribute(
+  public static LabelLateBoundDefault<CoverageConfiguration> coverageReportGeneratorAttribute(
       Label defaultValue) {
     return LabelLateBoundDefault.fromTargetConfiguration(
-        TestConfiguration.class, defaultValue, COVERAGE_REPORT_GENERATOR_CONFIGURATION_RESOLVER);
+        CoverageConfiguration.class,
+        defaultValue,
+        COVERAGE_REPORT_GENERATOR_CONFIGURATION_RESOLVER);
   }
 
   public static LabelLateBoundDefault<CoverageConfiguration> getCoverageOutputGeneratorLabel() {
@@ -157,13 +174,13 @@ public class BaseRuleClasses {
         CoverageConfiguration.class, null, COVERAGE_OUTPUT_GENERATOR_RESOLVER);
   }
 
-  @SerializationConstant @AutoCodec.VisibleForSerialization
+  @SerializationConstant @VisibleForSerialization
   static final Resolver<CoverageConfiguration, Label> COVERAGE_OUTPUT_GENERATOR_RESOLVER =
       (rule, attributes, configuration) -> configuration.outputGenerator();
 
   // TODO(b/65746853): provide a way to do this without passing the entire configuration
   /** Implementation for the :run_under attribute. */
-  @SerializationConstant @AutoCodec.VisibleForSerialization
+  @SerializationConstant @VisibleForSerialization
   public static final LabelLateBoundDefault<?> RUN_UNDER =
       LabelLateBoundDefault.fromTargetConfiguration(
           BuildConfigurationValue.class,
@@ -212,31 +229,31 @@ public class BaseRuleClasses {
           // Input files for every test action
           .add(
               attr("$test_wrapper", LABEL)
-                  .cfg(ExecutionTransitionFactory.create())
+                  .cfg(ExecutionTransitionFactory.createFactory())
                   .singleArtifact()
                   .value(env.getToolsLabel("//tools/test:test_wrapper")))
           .add(
               attr("$xml_writer", LABEL)
-                  .cfg(ExecutionTransitionFactory.create())
+                  .cfg(ExecutionTransitionFactory.createFactory())
                   .singleArtifact()
                   .value(env.getToolsLabel("//tools/test:xml_writer")))
           .add(
               attr("$test_runtime", LABEL_LIST)
-                  .cfg(ExecutionTransitionFactory.create())
+                  .cfg(ExecutionTransitionFactory.createFactory())
                   .value(getTestRuntimeLabelList(env)))
           .add(
               attr("$test_setup_script", LABEL)
-                  .cfg(ExecutionTransitionFactory.create())
+                  .cfg(ExecutionTransitionFactory.createFactory())
                   .singleArtifact()
                   .value(env.getToolsLabel("//tools/test:test_setup")))
           .add(
               attr("$xml_generator_script", LABEL)
-                  .cfg(ExecutionTransitionFactory.create())
+                  .cfg(ExecutionTransitionFactory.createFactory())
                   .singleArtifact()
                   .value(env.getToolsLabel("//tools/test:test_xml_generator")))
           .add(
               attr("$collect_coverage_script", LABEL)
-                  .cfg(ExecutionTransitionFactory.create())
+                  .cfg(ExecutionTransitionFactory.createFactory())
                   .singleArtifact()
                   .value(env.getToolsLabel("//tools/test:collect_coverage")))
           // Input files for test actions collecting code coverage
@@ -247,7 +264,7 @@ public class BaseRuleClasses {
           // Used in the one-per-build coverage report generation action.
           .add(
               attr(":coverage_report_generator", LABEL)
-                  .cfg(ExecutionTransitionFactory.create())
+                  .cfg(ExecutionTransitionFactory.createFactory())
                   .value(
                       coverageReportGeneratorAttribute(
                           env.getToolsLabel(DEFAULT_COVERAGE_REPORT_GENERATOR_VALUE))))
@@ -282,7 +299,7 @@ public class BaseRuleClasses {
     if (testRuntimeLabelList == null) {
       testRuntimeLabelList =
           ImmutableList.of(
-              Label.parseAbsoluteUnchecked(
+              Label.parseCanonicalUnchecked(
                   env.getToolsRepository() + TOOLS_TEST_RUNTIME_TARGET_PATTERN));
     }
     return testRuntimeLabelList;
@@ -291,6 +308,9 @@ public class BaseRuleClasses {
   /**
    * The attribute used to list the configuration properties used by a target and its transitive
    * dependencies. Currently only supports config_feature_flag.
+   *
+   * <p>A special value of "//command_line_option/fragments:test" instructs
+   * TestTrimmingTransitionFactory to skip trimming for this rule.
    */
   public static final String TAGGED_TRIMMING_ATTR = "transitive_configs";
 
@@ -307,7 +327,7 @@ public class BaseRuleClasses {
         .add(
             attr("visibility", NODEP_LABEL_LIST)
                 .orderIndependent()
-                .cfg(ExecutionTransitionFactory.create())
+                .cfg(ExecutionTransitionFactory.createFactory())
                 .nonconfigurable(
                     "special attribute integrated more deeply into Bazel's core logic"))
         .add(
@@ -342,12 +362,12 @@ public class BaseRuleClasses {
         .add(attr("features", STRING_LIST).orderIndependent())
         .add(
             attr(":action_listener", LABEL_LIST)
-                .cfg(ExecutionTransitionFactory.create())
+                .cfg(ExecutionTransitionFactory.createFactory())
                 .value(ACTION_LISTENER))
         .add(
             attr(RuleClass.COMPATIBLE_ENVIRONMENT_ATTR, LABEL_LIST)
                 .allowedRuleClasses(ConstraintConstants.ENVIRONMENT_RULE)
-                .cfg(ExecutionTransitionFactory.create())
+                .cfg(ExecutionTransitionFactory.createFactory())
                 .allowedFileTypes(FileTypeSet.NO_FILE)
                 .dontCheckConstraints()
                 .nonconfigurable(
@@ -355,7 +375,7 @@ public class BaseRuleClasses {
         .add(
             attr(RuleClass.RESTRICTED_ENVIRONMENT_ATTR, LABEL_LIST)
                 .allowedRuleClasses(ConstraintConstants.ENVIRONMENT_RULE)
-                .cfg(ExecutionTransitionFactory.create())
+                .cfg(ExecutionTransitionFactory.createFactory())
                 .allowedFileTypes(FileTypeSet.NO_FILE)
                 .dontCheckConstraints()
                 .nonconfigurable(
@@ -365,7 +385,8 @@ public class BaseRuleClasses {
                 .nonconfigurable("stores configurability keys"))
         .add(
             attr(RuleClass.APPLICABLE_LICENSES_ATTR, LABEL_LIST)
-                .cfg(ExecutionTransitionFactory.create())
+                .value(packageMetadataDefault)
+                .cfg(ExecutionTransitionFactory.createFactory())
                 .allowedFileTypes(FileTypeSet.NO_FILE)
                 // TODO(b/148601291): Require provider to be "LicenseInfo".
                 .dontCheckConstraints()
@@ -524,6 +545,7 @@ public class BaseRuleClasses {
     @Override
     @Nullable
     public ConfiguredTarget create(RuleContext ruleContext) {
+      ruleContext.ruleError("Rule is unimplemented.");
       return null;
     }
   }

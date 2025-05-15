@@ -25,9 +25,8 @@ import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.bugreport.BugReport;
 import com.google.devtools.build.lib.profiler.AutoProfiler;
 import com.google.devtools.build.lib.profiler.GoogleAutoProfilerUtils;
-import com.google.devtools.build.lib.util.GroupedList;
 import com.google.devtools.build.skyframe.QueryableGraph.Reason;
-import com.google.devtools.build.skyframe.SkyFunctionEnvironment.UndonePreviouslyRequestedDep;
+import com.google.devtools.build.skyframe.SkyFunctionEnvironment.UndonePreviouslyRequestedDeps;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -133,8 +132,9 @@ public class SimpleCycleDetector implements CycleDetector {
         if (cyclesFound < MAX_CYCLES) {
           // Value must be ready, because all of its children have finished, so we can build its
           // error.
-          checkState(entry.isReady(), "%s not ready. ValueEntry: %s", key, entry);
-        } else if (!entry.isReady()) {
+          checkState(
+              !entry.hasUnsignaledDeps(), "%s has unsignaled deps. ValueEntry: %s", key, entry);
+        } else if (entry.hasUnsignaledDeps()) {
           removedDeps =
               removeIncompleteChildrenForCycle(
                   key,
@@ -146,11 +146,11 @@ public class SimpleCycleDetector implements CycleDetector {
           continue;
         }
         maybeMarkRebuilding(entry);
-        GroupedList<SkyKey> directDeps = entry.getTemporaryDirectDeps();
+        GroupedDeps directDeps = entry.getTemporaryDirectDeps();
         // Find out which children have errors. Similar logic to that in Evaluate#run().
         List<ErrorInfo> errorDeps =
             getChildrenErrorsForCycle(
-                key, directDeps.getAllElementsAsIterable(), entry, evaluatorContext);
+                key, directDeps.getAllElementsAsIterable(), entry, evaluatorContext, removedDeps);
         checkState(
             !errorDeps.isEmpty(),
             "Node %s was not successfully evaluated, but had no child errors. NodeEntry: %s",
@@ -164,12 +164,12 @@ public class SimpleCycleDetector implements CycleDetector {
                   directDeps,
                   Sets.difference(entry.getAllRemainingDirtyDirectDeps(), removedDeps),
                   evaluatorContext);
-        } catch (UndonePreviouslyRequestedDep undoneDep) {
+        } catch (UndonePreviouslyRequestedDeps undoneDeps) {
           // All children were finished according to the CHILDREN_FINISHED sentinel, and cycle
           // detection does not do normal SkyFunction evaluation, so no restarting nor child
           // dirtying was possible.
           throw new IllegalStateException(
-              "Previously requested dep not done: " + undoneDep.getDepKey(), undoneDep);
+              "Previously requested deps not done: " + undoneDeps.getDepKeys(), undoneDeps);
         }
         env.setError(entry, ErrorInfo.fromChildErrors(key, errorDeps));
         Set<SkyKey> reverseDeps = env.commitAndGetParents(entry);
@@ -270,7 +270,7 @@ public class SimpleCycleDetector implements CycleDetector {
       }
 
       // This node is not yet known to be in a cycle. So process its children.
-      GroupedList<SkyKey> temporaryDirectDeps = entry.getTemporaryDirectDeps();
+      GroupedDeps temporaryDirectDeps = entry.getTemporaryDirectDeps();
       if (temporaryDirectDeps.isEmpty()) {
         continue;
       }
@@ -366,7 +366,8 @@ public class SimpleCycleDetector implements CycleDetector {
       SkyKey parent,
       Iterable<SkyKey> children,
       NodeEntry entryForDebugging,
-      ParallelEvaluatorContext evaluatorContext)
+      ParallelEvaluatorContext evaluatorContext,
+      Set<SkyKey> removedDepsForDebugging)
       throws InterruptedException {
     List<ErrorInfo> allErrors = new ArrayList<>();
     boolean foundCycle = false;
@@ -388,10 +389,11 @@ public class SimpleCycleDetector implements CycleDetector {
     }
     checkState(
         foundCycle,
-        "Key %s with entry %s had no cycle beneath it: %s",
+        "Key %s with entry %s had no cycle beneath it: %s; Removed deps: %s",
         parent,
         entryForDebugging,
-        allErrors);
+        allErrors,
+        removedDepsForDebugging);
     return allErrors;
   }
 
@@ -451,7 +453,7 @@ public class SimpleCycleDetector implements CycleDetector {
       int cycleLength,
       ParallelEvaluatorContext evaluatorContext)
       throws InterruptedException {
-    GroupedList<SkyKey> directDeps = entry.getTemporaryDirectDeps();
+    GroupedDeps directDeps = entry.getTemporaryDirectDeps();
     Set<SkyKey> unvisitedDeps = Sets.newHashSet(directDeps.getAllElementsAsIterable());
     unvisitedDeps.remove(cycleChild);
     // Remove any children from this node that are not part of the cycle we just found. They are
@@ -459,14 +461,14 @@ public class SimpleCycleDetector implements CycleDetector {
     // not built by the end of cycle-checking, we would have dangling references.
     Set<SkyKey> removedDeps =
         removeIncompleteChildrenForCycle(key, entry, unvisitedDeps, evaluatorContext);
-    if (!entry.isReady()) {
+    if (entry.hasUnsignaledDeps()) {
       // The entry has at most one undone dep now, its cycleChild. Signal to make entry ready. Note
       // that the entry can conceivably be ready if its cycleChild already found a different cycle
       // and was built.
       entry.signalDep(evaluatorContext.getGraphVersion(), cycleChild);
     }
     maybeMarkRebuilding(entry);
-    checkState(entry.isReady(), "%s %s %s", key, cycleChild, entry);
+    checkState(!entry.hasUnsignaledDeps(), "%s %s %s", key, cycleChild, entry);
     Iterator<SkyKey> it = toVisit.iterator();
     while (it.hasNext()) {
       SkyKey descendant = it.next();

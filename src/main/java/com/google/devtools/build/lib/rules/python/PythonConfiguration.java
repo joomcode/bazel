@@ -20,11 +20,14 @@ import com.google.devtools.build.docgen.annot.DocCategory;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.Fragment;
 import com.google.devtools.build.lib.analysis.config.RequiresOptions;
+import com.google.devtools.build.lib.analysis.starlark.annotations.StarlarkConfigurationField;
+import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.common.options.TriState;
 import javax.annotation.Nullable;
 import net.starlark.java.annot.StarlarkBuiltin;
+import net.starlark.java.annot.StarlarkMethod;
 import net.starlark.java.eval.StarlarkValue;
 
 /**
@@ -51,6 +54,9 @@ public class PythonConfiguration extends Fragment implements StarlarkValue {
   private final boolean useToolchains;
 
   private final boolean defaultToExplicitInitPy;
+  private final boolean disablePy2;
+  @Nullable private final Label nativeRulesAllowlist;
+  private final boolean disallowNativeRules;
 
   public PythonConfiguration(BuildOptions buildOptions) {
     PythonOptions pythonOptions = buildOptions.get(PythonOptions.class);
@@ -63,6 +69,9 @@ public class PythonConfiguration extends Fragment implements StarlarkValue {
     this.py2OutputsAreSuffixed = pythonOptions.incompatiblePy2OutputsAreSuffixed;
     this.useToolchains = pythonOptions.incompatibleUsePythonToolchains;
     this.defaultToExplicitInitPy = pythonOptions.incompatibleDefaultToExplicitInitPy;
+    this.disablePy2 = pythonOptions.disablePy2;
+    this.nativeRulesAllowlist = pythonOptions.nativeRulesAllowlist;
+    this.disallowNativeRules = pythonOptions.disallowNativeRules;
   }
 
   @Override
@@ -95,9 +104,17 @@ public class PythonConfiguration extends Fragment implements StarlarkValue {
     return defaultVersion;
   }
 
+  @StarlarkMethod(
+      name = "default_python_version",
+      structField = true,
+      doc = "The default python version from --incompatible_py3_is_default")
+  public String getDefaultPythonVersionForStarlark() {
+    return defaultVersion.name();
+  }
+
   @Override
-  @Nullable
-  public String getOutputDirectoryName() {
+  public void processForOutputPathMnemonic(Fragment.OutputDirectoriesContext ctx)
+      throws Fragment.OutputDirectoriesContext.AddToMnemonicException {
     Preconditions.checkState(version.isTargetValue());
     // The only possible Python target version values are PY2 and PY3. Historically, PY3 targets got
     // a "-py3" suffix and PY2 targets got the empty suffix, so that the bazel-bin symlink pointed
@@ -109,14 +126,23 @@ public class PythonConfiguration extends Fragment implements StarlarkValue {
             + "versions. Please check that PythonConfiguration#getOutputDirectoryName() is still "
             + "needed and is still able to avoid output directory clashes, then update this "
             + "canary message.");
+    ctx.markAsExplicitInOutputPathFor("python_version");
     if (py2OutputsAreSuffixed) {
-      return version == PythonVersion.PY2 ? "py2" : null;
+      if (version == PythonVersion.PY2) {
+        ctx.addToMnemonic("py2");
+      }
     } else {
-      return version == PythonVersion.PY3 ? "py3" : null;
+      if (version == PythonVersion.PY3) {
+        ctx.addToMnemonic("py3");
+      }
     }
   }
 
   /** Returns whether to build the executable zip file for Python binaries. */
+  @StarlarkMethod(
+      name = "build_python_zip",
+      structField = true,
+      doc = "The effective value of --build_python_zip")
   public boolean buildPythonZip() {
     switch (buildPythonZip) {
       case YES:
@@ -140,15 +166,47 @@ public class PythonConfiguration extends Fragment implements StarlarkValue {
    * Returns true if executable Python rules should obtain their runtime from the Python toolchain
    * rather than legacy flags.
    */
+  @StarlarkMethod(
+      name = "use_toolchains",
+      structField = true,
+      doc = "The value from the --incompatible_use_python_toolchains flag")
   public boolean useToolchains() {
     return useToolchains;
   }
 
+  @StarlarkMethod(
+      name = "default_to_explicit_init_py",
+      structField = true,
+      doc = "The value from the --incompatible_default_to_explicit_init_py flag")
   /**
    * Returns true if executable Python rules should only write out empty __init__ files to their
    * runfiles tree when explicitly requested via {@code legacy_create_init}.
    */
   public boolean defaultToExplicitInitPy() {
     return defaultToExplicitInitPy;
+  }
+
+  @StarlarkMethod(
+      name = "disable_py2",
+      structField = true,
+      doc = "The value of the --incompatible_python_disable_py2 flag.")
+  public boolean getDisablePy2() {
+    return disablePy2;
+  }
+
+  @StarlarkMethod(
+      name = "disallow_native_rules",
+      structField = true,
+      doc = "The value of the --incompatible_python_disallow_native_rules flag.")
+  public boolean getDisallowNativeRules() {
+    return disallowNativeRules;
+  }
+
+  @StarlarkConfigurationField(
+      name = "native_rules_allowlist",
+      doc = "The value of --python_native_rules_allowlist; may be None if not specified")
+  @Nullable
+  public Label getNativeRulesAllowlist() {
+    return nativeRulesAllowlist;
   }
 }

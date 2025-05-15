@@ -17,15 +17,21 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <jni.h>
 #include <limits.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 #include <utime.h>
 
@@ -48,6 +54,11 @@
 
 namespace blaze_jni {
 
+struct DIROrError {
+  DIR *dir;
+  int error;
+};
+
 static void PostException(JNIEnv *env, const char *exception_classname,
                           const std::string &message) {
   jclass exception_class = env->FindClass(exception_classname);
@@ -56,7 +67,8 @@ static void PostException(JNIEnv *env, const char *exception_classname,
     success = env->ThrowNew(exception_class, message.c_str()) == 0;
   }
   if (!success) {
-    BAZEL_LOG(FATAL) << "Failure to throw java error: " << message.c_str();
+    BAZEL_LOG(FATAL) << "Failed to throw Java exception from JNI: "
+                     << message.c_str();
   }
 }
 
@@ -479,32 +491,25 @@ Java_com_google_devtools_build_lib_unix_NativePosixFiles_errnoLstat(JNIEnv *env,
 
 /*
  * Class:     com.google.devtools.build.lib.unix.NativePosixFiles
- * Method:    utime
- * Signature: (Ljava/lang/String;ZII)V
+ * Method:    utimensat
+ * Signature: (Ljava/lang/String;ZJ)V
  * Throws:    java.io.IOException
  */
 extern "C" JNIEXPORT void JNICALL
-Java_com_google_devtools_build_lib_unix_NativePosixFiles_utime(JNIEnv *env,
-                                                  jclass clazz,
-                                                  jstring path,
-                                                  jboolean now,
-                                                  jint modtime) {
+Java_com_google_devtools_build_lib_unix_NativePosixFiles_utimensat(
+    JNIEnv *env, jclass clazz, jstring path, jboolean now, jlong millis) {
   const char *path_chars = GetStringLatin1Chars(env, path);
-#ifdef __linux
-  struct timespec spec[2] = {{0, UTIME_OMIT}, {modtime, now ? UTIME_NOW : 0}};
+  int64_t sec = millis / 1000;
+  int32_t nsec = (millis % 1000) * 1000000;
+  struct timespec spec[2] = {
+      // Do not set atime.
+      {0, UTIME_OMIT},
+      // Set mtime to now if `now` is true, otherwise to the specified time.
+      {sec, now ? UTIME_NOW : nsec},
+  };
   if (::utimensat(AT_FDCWD, path_chars, spec, 0) == -1) {
     PostException(env, errno, path_chars);
   }
-#else
-  struct utimbuf buf = { modtime, modtime };
-  struct utimbuf *bufptr = now ? nullptr : &buf;
-  if (::utime(path_chars, bufptr) == -1) {
-    // EACCES ENOENT EMULTIHOP ELOOP EINTR
-    // ENOTDIR ENOLINK EPERM EROFS   -> IOException
-    // EFAULT ENAMETOOLONG           -> RuntimeException
-    PostException(env, errno, path_chars);
-  }
-#endif
   ReleaseStringLatin1Chars(path_chars);
 }
 
@@ -571,20 +576,25 @@ Java_com_google_devtools_build_lib_unix_NativePosixFiles_mkdirWritable(
       PostException(env, errno, path_chars);
       return false;
     }
-    // directory does not exist.
+    // Directory does not exist.
+    // Use 0777 so that the permissions can be overridden by umask(2).
     if (::mkdir(path_chars, 0777) == -1) {
       PostException(env, errno, path_chars);
     }
     return true;
   }
-  // path already exists
+  // Path already exists, but might not be a directory.
   if (!S_ISDIR(statbuf.st_mode)) {
     PostException(env, ENOTDIR, path_chars);
     return false;
   }
-  // Make sure the mode is correct.
-  if ((statbuf.st_mode & 0777) != 0777 && ::chmod(path_chars, 0777) == -1) {
-    PostException(env, errno, path_chars);
+  // Make sure the permissions are correct.
+  // Avoid touching permissions for group/other, which may have been overridden
+  // by umask(2) when this directory was originally created.
+  if ((statbuf.st_mode & S_IRWXU) != S_IRWXU) {
+    if (::chmod(path_chars, statbuf.st_mode | S_IRWXU) == -1) {
+      PostException(env, errno, path_chars);
+    }
   }
   return false;
 }
@@ -905,13 +915,17 @@ static void PostDeleteTreesBelowException(
 // dir_path contains the path components that were used when opening dir_fd and
 // is only used for error reporting purposes.
 //
-// Returns a directory on success. Returns NULL on error and posts an
-// exception.
-static DIR* ForceOpendir(JNIEnv* env, const std::vector<std::string>& dir_path,
-                         const int dir_fd, const char* entry) {
+// Returns a directory handle on success or an errno on error. If the error is
+// other than ENOENT, posts an exception before returning.
+static DIROrError ForceOpendir(JNIEnv *env,
+                               const std::vector<std::string> &dir_path,
+                               const int dir_fd, const char *entry) {
   static const int flags = O_RDONLY | O_NOFOLLOW | PORTABLE_O_DIRECTORY;
   int fd = openat(dir_fd, entry, flags);
   if (fd == -1) {
+    if (errno == ENOENT) {
+      return {nullptr, errno};
+    }
     // If dir_fd is a readable but non-executable directory containing entry, we
     // could have obtained entry by readdir()-ing, but any attempt to open or
     // stat the entry would fail with EACCESS. In this case, we need to fix the
@@ -920,27 +934,36 @@ static DIR* ForceOpendir(JNIEnv* env, const std::vector<std::string>& dir_path,
     // recursion).
     if (errno == EACCES && dir_fd != AT_FDCWD) {
       if (fchmod(dir_fd, 0700) == -1) {
-        PostDeleteTreesBelowException(env, errno, "fchmod", dir_path, nullptr);
-        return nullptr;
+        if (errno != ENOENT) {
+          PostDeleteTreesBelowException(env, errno, "fchmod", dir_path,
+                                        nullptr);
+        }
+        return {nullptr, errno};
       }
     }
     if (fchmodat(dir_fd, entry, 0700, 0) == -1) {
-      PostDeleteTreesBelowException(env, errno, "fchmodat", dir_path, entry);
-      return nullptr;
+      if (errno != ENOENT) {
+        PostDeleteTreesBelowException(env, errno, "fchmodat", dir_path, entry);
+      }
+      return {nullptr, errno};
     }
     fd = openat(dir_fd, entry, flags);
     if (fd == -1) {
-      PostDeleteTreesBelowException(env, errno, "opendir", dir_path, entry);
-      return nullptr;
+      if (errno != ENOENT) {
+        PostDeleteTreesBelowException(env, errno, "opendir", dir_path, entry);
+      }
+      return {nullptr, errno};
     }
   }
   DIR* dir = fdopendir(fd);
   if (dir == nullptr) {
-    PostDeleteTreesBelowException(env, errno, "fdopendir", dir_path, entry);
+    if (errno != ENOENT) {
+      PostDeleteTreesBelowException(env, errno, "fdopendir", dir_path, entry);
+    }
     close(fd);
-    return nullptr;
+    return {nullptr, errno};
   }
-  return dir;
+  return {dir, 0};
 }
 
 // Tries to delete a file within a directory and, if the first attempt fails,
@@ -953,17 +976,27 @@ static DIR* ForceOpendir(JNIEnv* env, const std::vector<std::string>& dir_path,
 //
 // is_dir indicates whether the entry to delete is a directory or not.
 //
-// Returns 0 on success. Returns -1 on error and posts an exception.
+// Returns 0 when the file doesn't exist or is successfully deleted. Otherwise,
+// returns -1 and posts an exception.
 static int ForceDelete(JNIEnv* env, const std::vector<std::string>& dir_path,
                        const int dir_fd, const char* entry,
                        const bool is_dir) {
   const int flags = is_dir ? AT_REMOVEDIR : 0;
   if (unlinkat(dir_fd, entry, flags) == -1) {
+    if (errno == ENOENT) {
+      return 0;
+    }
     if (fchmod(dir_fd, 0700) == -1) {
+      if (errno == ENOENT) {
+        return 0;
+      }
       PostDeleteTreesBelowException(env, errno, "fchmod", dir_path, nullptr);
       return -1;
     }
     if (unlinkat(dir_fd, entry, flags) == -1) {
+      if (errno == ENOENT) {
+        return 0;
+      }
       PostDeleteTreesBelowException(env, errno, "unlinkat", dir_path, entry);
       return -1;
     }
@@ -994,6 +1027,10 @@ static int IsSubdir(JNIEnv* env, const std::vector<std::string>& dir_path,
     case DT_UNKNOWN: {
       struct stat st;
       if (fstatat(dir_fd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
+        if (errno == ENOENT) {
+          *is_dir = false;
+          return 0;
+        }
         PostDeleteTreesBelowException(env, errno, "fstatat", dir_path,
                                       de->d_name);
         return -1;
@@ -1024,8 +1061,12 @@ static int IsSubdir(JNIEnv* env, const std::vector<std::string>& dir_path,
 // Returns 0 on success. Returns -1 on error and posts an exception.
 static int DeleteTreesBelow(JNIEnv* env, std::vector<std::string>* dir_path,
                             const int dir_fd, const char* entry) {
-  DIR *dir = ForceOpendir(env, *dir_path, dir_fd, entry);
+  DIROrError dir_or_error = ForceOpendir(env, *dir_path, dir_fd, entry);
+  DIR *dir = dir_or_error.dir;
   if (dir == nullptr) {
+    if (dir_or_error.error == ENOENT) {
+      return 0;
+    }
     BAZEL_CHECK_NE(env->ExceptionOccurred(), nullptr);
     return -1;
   }
@@ -1033,16 +1074,25 @@ static int DeleteTreesBelow(JNIEnv* env, std::vector<std::string>* dir_path,
   dir_path->push_back(entry);
   // On macOS and some other non-Linux OSes, on some filesystems, readdir(dir)
   // may return NULL after an entry in dir is deleted even if not all files have
-  // been read yet - see https://support.apple.com/kb/TA21420; we thus read all
-  // the names of dir's entries before deleting. We don't want to simply use
-  // fts(3) because we want to be able to chmod at any point in the directory
-  // hierarchy to retry a filesystem operation after hitting an EACCES.
+  // been read yet - see
+  // https://pubs.opengroup.org/onlinepubs/9699919799/functions/readdir.html;
+  // "If a file is removed from or added to the directory after the most recent
+  // call to opendir() or rewinddir(), whether a subsequent call to readdir()
+  // returns an entry for that file is unspecified." We thus read all the names
+  // of dir's entries before deleting. We don't want to simply use fts(3)
+  // because we want to be able to chmod at any point in the directory hierarchy
+  // to retry a filesystem operation after hitting an EACCES.
+  // If in the future we hit any problems here due to the unspecified behavior
+  // of readdir() when a file has been deleted by a different thread we can use
+  // some form of locking to make sure the threads don't try to clean up the
+  // same directory at the same time; or doing it in a loop until the directory
+  // is really empty.
   std::vector<std::string> dir_files, dir_subdirs;
   for (;;) {
     errno = 0;
     struct dirent* de = readdir(dir);
     if (de == nullptr) {
-      if (errno != 0) {
+      if (errno != 0 && errno != ENOENT) {
         PostDeleteTreesBelowException(env, errno, "readdir", *dir_path,
                                       nullptr);
       }
@@ -1231,19 +1281,6 @@ Java_com_google_devtools_build_lib_unix_NativePosixFiles_write(
     }
   }
   free(buf);
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_google_devtools_build_lib_unix_NativePosixSystem_sysctlbynameGetLong(
-    JNIEnv *env, jclass clazz, jstring name) {
-  const char *name_chars = GetStringLatin1Chars(env, name);
-  int64_t r;
-  size_t len = sizeof(r);
-  if (portable_sysctlbyname(name_chars, &r, &len) == -1) {
-    PostException(env, errno, std::string("sysctlbyname(") + name_chars + ")");
-  }
-  ReleaseStringLatin1Chars(name_chars);
-  return (jlong)r;
 }
 
 /*
@@ -1549,6 +1586,103 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_google_devtools_build_lib_platform_SystemCPUSpeedModule_cpuSpeed(
     JNIEnv *env, jclass) {
   return portable_cpu_speed();
+}
+
+static int convert_ipaddr(struct sockaddr *addr, int family, char *buf,
+                          int buf_len) {
+  if (buf_len > 0) {
+    buf[0] = 0;
+  }
+  int addr_len = 0;
+  if (family == AF_INET) {
+    addr_len = sizeof(struct sockaddr_in);
+  } else if (family == AF_INET6) {
+    addr_len = sizeof(struct sockaddr_in6);
+  }
+  if (addr_len != 0) {
+    int err =
+        getnameinfo(addr, addr_len, buf, buf_len, nullptr, 0, NI_NUMERICHOST);
+    if (err != 0) {
+      return err;
+    }
+  }
+  return 0;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_google_devtools_build_lib_profiler_SystemNetworkStats_getNetIfAddrsNative(
+    JNIEnv *env, jclass clazz, jobject addrs_list) {
+  ifaddrs *ifaddr;
+  if (getifaddrs(&ifaddr) == -1) {
+    PostException(env, errno, "getifaddrs");
+    return;
+  }
+
+  jclass list_class = env->GetObjectClass(addrs_list);
+  jmethodID list_add =
+      env->GetMethodID(list_class, "add", "(Ljava/lang/Object;)Z");
+
+  jclass addr_class = env->FindClass(
+      "com/google/devtools/build/lib/profiler/SystemNetworkStats$NetIfAddr");
+  jmethodID addr_create = env->GetStaticMethodID(
+      addr_class, "create",
+      "(Ljava/lang/String;Lcom/google/devtools/build/lib/profiler/"
+      "SystemNetworkStats$NetIfAddr$Family;Ljava/lang/String;)Lcom/google/"
+      "devtools/build/lib/profiler/SystemNetworkStats$NetIfAddr;");
+
+  jclass family_class = env->FindClass(
+      "com/google/devtools/build/lib/profiler/"
+      "SystemNetworkStats$NetIfAddr$Family");
+  const char *family_class_sig =
+      "Lcom/google/devtools/build/lib/profiler/"
+      "SystemNetworkStats$NetIfAddr$Family;";
+  jfieldID family_af_inet_id =
+      env->GetStaticFieldID(family_class, "AF_INET", family_class_sig);
+  jobject family_af_inet =
+      env->GetStaticObjectField(family_class, family_af_inet_id);
+  jfieldID family_af_inet6_id =
+      env->GetStaticFieldID(family_class, "AF_INET6", family_class_sig);
+  jobject family_af_inet6 =
+      env->GetStaticObjectField(family_class, family_af_inet6_id);
+  jfieldID family_unknown_id =
+      env->GetStaticFieldID(family_class, "UNKNOWN", family_class_sig);
+  jobject family_unknown =
+      env->GetStaticObjectField(family_class, family_unknown_id);
+
+  for (ifaddrs *ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+    if (!ifa->ifa_addr) {
+      continue;
+    }
+    jstring name = env->NewStringUTF(ifa->ifa_name);
+
+    int family = ifa->ifa_addr->sa_family;
+
+    jobject family_enum;
+    switch (family) {
+      case AF_INET:
+        family_enum = family_af_inet;
+        break;
+      case AF_INET6:
+        family_enum = family_af_inet6;
+        break;
+      default:
+        family_enum = family_unknown;
+    }
+
+    char buf[NI_MAXHOST];
+    int err = convert_ipaddr(ifa->ifa_addr, family, buf, sizeof(buf));
+    if (err != 0) {
+      PostException(env, errno, "convert_ipaddr");
+      return;
+    }
+    jstring ipaddr = env->NewStringUTF(buf);
+
+    jobject addr = env->CallStaticObjectMethod(addr_class, addr_create, name,
+                                               family_enum, ipaddr);
+    env->CallObjectMethod(addrs_list, list_add, addr);
+  }
+
+  freeifaddrs(ifaddr);
 }
 
 }  // namespace blaze_jni

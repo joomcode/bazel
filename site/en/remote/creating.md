@@ -3,7 +3,9 @@ Book: /_book.yaml
 
 # Creating Persistent Workers
 
-[Persistent workers](/docs/persistent-workers) can make your build faster. If
+{% include "_buttons.html" %}
+
+[Persistent workers](/remote/persistent) can make your build faster. If
 you have repeated actions in your build that have a high startup cost or would
 benefit from cross-action caching, you may want to implement your own persistent
 worker to perform these actions.
@@ -21,10 +23,10 @@ The worker implementation has two parts:
 A persistent worker upholds a few requirements:
 
 *   It reads
-    [WorkRequests](https://github.com/bazelbuild/bazel/blob/6d1b9725b1e201ca3f25d8ec2a730a20aab62c6e/src/main/protobuf/worker_protocol.proto#L35){: .external}
+    [WorkRequests](https://github.com/bazelbuild/bazel/blob/54a547f30fd582933889b961df1d6e37a3e33d85/src/main/protobuf/worker_protocol.proto#L36){: .external}
     from its `stdin`.
 *   It writes
-    [WorkResponses](https://github.com/bazelbuild/bazel/blob/6d1b9725b1e201ca3f25d8ec2a730a20aab62c6e/src/main/protobuf/worker_protocol.proto#L49){: .external}
+    [WorkResponses](https://github.com/bazelbuild/bazel/blob/54a547f30fd582933889b961df1d6e37a3e33d85/src/main/protobuf/worker_protocol.proto#L77){: .external}
     (and only `WorkResponse`s) to its `stdout`.
 *   It accepts the `--persistent_worker` flag. The wrapper must recognize the
     `--persistent_worker` command-line flag and only make itself persistent if
@@ -63,7 +65,7 @@ Bazel sets the `verbosity` field to 10, but smaller or larger values can be used
 manually for different amounts of output.
 
 The optional `sandbox_dir` field is used only by workers that support
-[multiplex sandboxing](/docs/multiplex-worker).
+[multiplex sandboxing](/remote/multiplex).
 
 ### Work responses {:#work-responses}
 
@@ -235,7 +237,7 @@ ctx.actions.run(
 ```
 
 For another example, see
-[Implementing persistent workers](/docs/persistent-workers#implementation).
+[Implementing persistent workers](/remote/persistent#implementation).
 
 ## Examples {:#examples}
 

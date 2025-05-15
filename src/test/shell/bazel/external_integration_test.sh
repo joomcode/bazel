@@ -49,6 +49,9 @@ EOF
 
 tear_down() {
   shutdown_server
+  if [ -d "${TEST_TMPDIR}/server_dir" ]; then
+    rm -fr "${TEST_TMPDIR}/server_dir"
+  fi
 }
 
 function zip_up() {
@@ -212,6 +215,22 @@ http_archive(
     name = 'test_zstd_repo',
     url = 'file://$(rlocation io_bazel/src/test/shell/bazel/testdata/zstd_test_archive.tar.zst)',
     sha256 = '12b0116f2a3c804859438e102a8a1d5f494c108d1b026da9f6ca55fb5107c7e9',
+    build_file_content = 'filegroup(name="x", srcs=glob(["*"]))',
+)
+EOF
+  bazel build @test_zstd_repo//...
+
+  base_external_path=bazel-out/../external/test_zstd_repo
+  assert_contains "test content" "${base_external_path}/test_dir/test_file"
+}
+
+function test_http_archive_upper_case_sha() {
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+    name = 'test_zstd_repo',
+    url = 'file://$(rlocation io_bazel/src/test/shell/bazel/testdata/zstd_test_archive.tar.zst)',
+    sha256 = '12B0116F2A3C804859438E102A8A1D5F494C108D1B026DA9F6CA55FB5107C7E9',
     build_file_content = 'filegroup(name="x", srcs=glob(["*"]))',
 )
 EOF
@@ -394,6 +413,188 @@ EOF
   expect_log "404 Not Found"
 }
 
+function test_deferred_download_unwaited() {
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<'EOF'
+load("hang.bzl", "hang")
+
+hang(name="hang")
+EOF
+
+  cat > hang.bzl <<'EOF'
+def _hang_impl(rctx):
+  hangs = rctx.download(
+    # This URL will definitely not work, but that's OK -- we don't need a
+    # successful request for this test
+    url = "https://127.0.0.1:0/does_not_exist",
+    output = "does_not_exist",
+    block = False)
+
+hang = repository_rule(implementation = _hang_impl)
+EOF
+
+  touch BUILD
+  bazel query @hang//:all >& $TEST_log && fail "Bazel unexpectedly succeeded"
+  expect_log "Pending asynchronous work"
+}
+
+function test_deferred_download_two_parallel_downloads() {
+  local server_dir="${TEST_TMPDIR}/server_dir"
+  local gate_socket="${server_dir}/gate_socket"
+  local served_apple="APPLE"
+  local served_banana="BANANA"
+  local apple_sha256=$(echo "${served_apple}" | sha256sum | cut -f1 -d' ')
+  local banana_sha256=$(echo "${served_banana}" | sha256sum | cut -f1 -d' ')
+
+  mkdir -p "${server_dir}"
+
+  mkfifo "${server_dir}/apple" || fail "cannot mkfifo"
+  mkfifo "${server_dir}/banana" || fail "cannot mkfifo"
+  mkfifo $gate_socket || fail "cannot mkfifo"
+
+  startup_server "${server_dir}"
+
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<'EOF'
+load("defer.bzl", "defer")
+
+defer(name="defer")
+EOF
+
+  cat > defer.bzl <<EOF
+def _defer_impl(rctx):
+  requests = [
+    ["apple", "${apple_sha256}"],
+    ["banana", "${banana_sha256}"]
+  ]
+  pending = [
+    rctx.download(
+        url = "http://127.0.0.1:${fileserver_port}/" + name,
+        sha256 = sha256,
+        output = name,
+        block = False)
+    for name, sha256 in requests]
+
+  # Tell the rest of the test to unblock the HTTP server
+  rctx.execute(["/bin/sh", "-c", "echo ok > ${server_dir}/gate_socket"])
+
+  # Wait until the requess are done
+  [p.wait() for p in pending]
+
+  rctx.file("WORKSPACE", "")
+  rctx.file("BUILD", "filegroup(name='f', srcs=glob(['**']))")
+
+defer = repository_rule(implementation = _defer_impl)
+EOF
+
+  touch BUILD
+
+  # Start Bazel
+  bazel query @defer//:all >& $TEST_log &
+  local bazel_pid=$!
+
+  # Wait until the .download() calls return
+  cat "${server_dir}/gate_socket"
+
+  # Tell the test server the strings it should serve. In parallel because the
+  # test server apparently cannot serve two HTTP requests in parallel, so if we
+  # wait for request A to be completely served while unblocking request B, it is
+  # possible that the test server wants to serve request B first, which is a
+  # deadlock.
+  echo "${served_apple}" > "${server_dir}/apple" &
+  local apple_pid=$!
+  echo "${served_banana}" > "${server_dir}/banana" &
+  local banana_pid=$!
+  wait $apple_pid
+  wait $banana_pid
+
+  # Wait until Bazel returns
+  wait "${bazel_pid}" || fail "Bazel failed"
+  expect_log "@defer//:f"
+}
+
+function test_deferred_download_error() {
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<'EOF'
+load("defer.bzl", "defer")
+
+defer(name="defer")
+EOF
+
+  cat > defer.bzl <<EOF
+def _defer_impl(rctx):
+  deferred = rctx.download(
+    url = "https://127.0.0.1:0/doesnotexist",
+    output = "deferred",
+    block = False)
+
+  deferred.wait()
+  print("survived wait")
+  rctx.file("WORKSPACE", "")
+  rctx.file("BUILD", "filegroup(name='f', srcs=glob(['**']))")
+
+defer = repository_rule(implementation = _defer_impl)
+EOF
+
+  touch BUILD
+
+  # Start Bazel
+  bazel query @defer//:all >& $TEST_log && fail "Bazel unexpectedly succeeded"
+  expect_log "Error downloading.*doesnotexist"
+  expect_not_log "survived wait"
+}
+
+function test_deferred_download_smoke() {
+  local server_dir="${TEST_TMPDIR}/server_dir"
+  local served_socket="${server_dir}/served_socket"
+  local gate_socket="${server_dir}/gate_socket"
+  local served_string="DEFERRED"
+  local served_sha256=$(echo "${served_string}" | sha256sum | cut -f1 -d' ')
+
+  mkdir -p "${server_dir}"
+
+  mkfifo $served_socket || fail "cannot mkfifo"
+  mkfifo $gate_socket || fail "cannot mkfifo"
+
+  startup_server "${server_dir}"
+
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<'EOF'
+load("defer.bzl", "defer")
+
+defer(name="defer")
+EOF
+
+  cat > defer.bzl <<EOF
+def _defer_impl(rctx):
+  deferred = rctx.download(
+    url = "http://127.0.0.1:${fileserver_port}/served_socket",
+    sha256 = "${served_sha256}",
+    output = "deferred",
+    block = False)
+
+  # Tell the rest of the test to unblock the HTTP server
+  rctx.execute(["/bin/sh", "-c", "echo ok > ${server_dir}/gate_socket"])
+  deferred.wait()
+  rctx.file("WORKSPACE", "")
+  rctx.file("BUILD", "filegroup(name='f', srcs=glob(['**']))")
+
+defer = repository_rule(implementation = _defer_impl)
+EOF
+
+  touch BUILD
+
+  # Start Bazel
+  bazel query @defer//:all-targets >& $TEST_log &
+  local bazel_pid=$!
+
+  # Wait until the .download() call returns
+  cat "${server_dir}/gate_socket"
+
+  # Tell the test server the string it should serve
+  echo "${served_string}" > "${server_dir}/served_socket"
+
+  # Wait until Bazel returns
+  wait "${bazel_pid}" || fail "Bazel failed"
+  expect_log "@defer//:deferred"
+}
+
 # Tests downloading a file and using it as a dependency.
 function test_http_download() {
   local test_file=$TEST_TMPDIR/toto
@@ -423,7 +624,7 @@ genrule(
   name = "test_sh",
   outs = ["test.sh"],
   srcs = ["@toto//file"],
-  cmd = "echo '#!/bin/sh' > $@ && echo $(location @toto//file) >> $@",
+  cmd = "echo '#!/bin/sh' > $@ && echo $(rootpath @toto//file) >> $@",
 )
 EOF
 
@@ -481,7 +682,7 @@ genrule(
   name = "test_sh",
   outs = ["test.sh"],
   srcs = ["@toto//file"],
-  cmd = "echo '#!/bin/sh' > $@ && echo cat $(location @toto//file) >> $@",
+  cmd = "echo '#!/bin/sh' > $@ && echo cat $(rootpath @toto//file) >> $@",
 )
 EOF
 
@@ -657,7 +858,7 @@ EOF
   # But it is required after a clean.
   bazel clean --expunge || fail "Clean failed"
   bazel build --fetch=false //zoo:ball-pit >& $TEST_log && fail "Expected build to fail"
-  expect_log "bazel fetch //..."
+  expect_log "fetching repositories is disabled"
 }
 
 function test_prefix_stripping_tar_gz() {
@@ -912,6 +1113,7 @@ EOF
 
 function test_use_bind_as_repository() {
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<'EOF'
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name = 'foobar', path = 'foo')
 bind(name = 'foo', actual = '@foobar//:test')
 EOF
@@ -928,7 +1130,23 @@ genrule(
 )
 EOF
   bazel build :foo &> "$TEST_log" && fail "Expected failure" || true
-  expect_log "no such package '@foo//'"
+  expect_log "No repository visible as '@foo' from main repository"
+}
+
+function test_bind_repo_mapping() {
+  cat >> $(create_workspace_with_default_repos WORKSPACE myws) <<'EOF'
+load('//:foo.bzl', 'foo')
+foo()
+bind(name='bar', actual='@myws//:something')
+EOF
+  cat > foo.bzl <<'EOF'
+def foo():
+  native.bind(name='foo', actual='@myws//:something')
+EOF
+  cat > BUILD <<'EOF'
+filegroup(name='something', visibility=["//visibility:public"])
+EOF
+  bazel build //external:foo //external:bar &> "$TEST_log" || fail "don't fail!"
 }
 
 function test_flip_flopping() {
@@ -946,6 +1164,7 @@ function test_flip_flopping() {
   cd -
 
   cat > local_ws <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(
     name = "repo",
     path = "$REPO_PATH",
@@ -1072,6 +1291,7 @@ function test_integrity_incorrect() {
   create_workspace_with_default_repos WORKSPACE
   touch BUILD
   zip -r repo.zip *
+  integrity="sha256-$(cat repo.zip | openssl dgst -sha256 -binary | openssl base64 -A)"
   startup_server $PWD
   cd -
 
@@ -1086,7 +1306,21 @@ EOF
   bazel build @repo//... &> $TEST_log 2>&1 && fail "Expected to fail"
   expect_log "Error downloading \\[http://127.0.0.1:$fileserver_port/repo.zip\\] to"
   # Bazel translates the integrity value back to the sha256 checksum.
-  expect_log "but wanted 61a6f762aaf60652cbf332879b8dcc2cfd81be2129a061da957d039eae77f0b0"
+  expect_log "Checksum was $integrity but wanted sha256-Yab3Yqr2BlLL8zKHm43MLP2BviEpoGHalX0Dnq538LA="
+  shutdown_server
+}
+
+function test_integrity_ill_formed_base64() {
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+    name = "repo",
+    integrity = "sha256-Yab3Yqr2BlLL8zKHm43MLP2BviEpoGHalX0Dnq538L=",
+    url = "file:///dev/null",
+)
+EOF
+  bazel build @repo//... &> $TEST_log 2>&1 && fail "Expected to fail"
+  expect_log "Invalid base64 'Yab3Yqr2BlLL8zKHm43MLP2BviEpoGHalX0Dnq538L='"
   shutdown_server
 }
 
@@ -1724,8 +1958,8 @@ EOF
 }
 
 function test_cache_hit_reported() {
-  # Verify that information about a chache hit is reported
-  # if an error happend in that repository. This information
+  # Verify that information about a cache hit is reported
+  # if an error happened in that repository. This information
   # is useful as users sometimes change the URL but do not
   # update the hash.
   WRKDIR=$(mktemp -d "${TEST_TMPDIR}/testXXXXXX")
@@ -2173,7 +2407,7 @@ genrule(
 )
 EOF
   bazel build --curses=yes //:local > "${TEST_log}" 2>&1 \
-      || fail "exepected succes"
+      || fail "expected success"
   expect_log "foo.*First action"
   expect_log "foo.*Second action"
 }
@@ -2445,7 +2679,7 @@ EOF
 
   mkdir main
   cd main
-  cat > foo.bzl <<'EOF'
+  cat > foo.bzl <<EOF
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 def foo():
@@ -2455,7 +2689,7 @@ def foo():
     build_file = "@b//:a.BUILD",
   )
 EOF
-  cat > bar.bzl <<'EOF'
+  cat > bar.bzl <<EOF
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 def bar():
@@ -2533,7 +2767,7 @@ EOF
 
   expect_log "you have to add.*this_repo_is_missing.*WORKSPACE"
   # Also verify that the repository class and its definition is reported, to
-  # help finding out where the implict dependency comes from.
+  # help finding out where the implicit dependency comes from.
   expect_log "Repository data instantiated at:"
   expect_log ".../WORKSPACE:[0-9]*"
   expect_log "Repository rule data_repo defined at:"
@@ -2622,6 +2856,7 @@ function test_external_java_target_depends_on_external_resources() {
   mkdir -p $test_repo2
 
   cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 local_repository(name = 'repo1', path='$test_repo1')
 local_repository(name = 'repo2', path='$test_repo2')
 EOF
@@ -2743,6 +2978,154 @@ EOF
   expect_log "//not-external:B"
   expect_log "//external/nested:a"
   expect_log "//external/nested:A"
+}
+
+function test_external_deps_skymeld() {
+  # A minimal build to make sure bazel in Skymeld mode can build with external
+  # dependencies.
+  mkdir ext
+  echo content > ext/ext
+  EXTREPODIR=`pwd`
+  zip ext.zip ext/*
+  rm -rf ext
+
+  rm -rf main
+  mkdir main
+  cd main
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+  name="ext",
+  strip_prefix="ext",
+  url="file://${EXTREPODIR}/ext.zip",
+  build_file_content="exports_files([\"ext\"])",
+)
+EOF
+  cat > BUILD <<'EOF'
+genrule(
+  name = "foo",
+  srcs = ["@ext//:ext"],
+  outs = ["foo"],
+  cmd = "cp $< $@",
+)
+EOF
+  execroot="$(bazel info execution_root)"
+
+  bazel build --experimental_merged_skyframe_analysis_execution //:foo \
+    || fail 'Expected build to succeed with Skymeld'
+
+  test -h "$execroot/external/ext" || fail "Expected symlink to external repo."
+}
+
+function test_default_canonical_id_enabled() {
+    cat > repo.bzl <<EOF
+load("@bazel_tools//tools/build_defs/repo:cache.bzl", "get_default_canonical_id")
+
+def _impl(rctx):
+  print("canonical_id", repr(get_default_canonical_id(rctx, ["url-1", "url-2"])))
+  rctx.file("BUILD", "")
+
+dummy_repository = repository_rule(_impl)
+EOF
+  touch BUILD
+  cat > MODULE.bazel <<EOF
+dummy_repository = use_repo_rule('//:repo.bzl', 'dummy_repository')
+dummy_repository(name = 'foo')
+EOF
+
+  # NOTE: Test environment modifies defaults, so --repo_env must be explicitly set
+  bazel query @foo//:all --repo_env=BAZEL_HTTP_RULES_URLS_AS_DEFAULT_CANONICAL_ID=1 \
+    2>$TEST_log || fail 'Expected fetch to succeed'
+  expect_log "canonical_id \"url-1 url-2\""
+}
+
+function test_default_canonical_id_disabled() {
+    cat > repo.bzl <<EOF
+load("@bazel_tools//tools/build_defs/repo:cache.bzl", "get_default_canonical_id")
+
+def _impl(rctx):
+  print("canonical_id", repr(get_default_canonical_id(rctx, ["url-1", "url-2"])))
+  rctx.file("BUILD", "")
+
+dummy_repository = repository_rule(_impl)
+EOF
+  touch BUILD
+  cat > MODULE.bazel <<EOF
+dummy_repository = use_repo_rule('//:repo.bzl', 'dummy_repository')
+dummy_repository(name = 'foo')
+EOF
+
+  # NOTE: Test environment modifies defaults, so --repo_env must be explicitly set
+  bazel query @foo//:all --repo_env=BAZEL_HTTP_RULES_URLS_AS_DEFAULT_CANONICAL_ID=0 \
+    2>$TEST_log || fail 'Expected fetch to succeed'
+  expect_log "canonical_id \"\""
+}
+
+function test_environ_incrementally() {
+  # Set up workspace with a repository rule to examine env vars.  Assert that undeclared
+  # env vars don't trigger reevaluations.
+  cat > repo.bzl <<EOF
+def _impl(rctx):
+  rctx.symlink(rctx.attr.build_file, 'BUILD')
+  print('UNDECLARED_KEY=%s' % rctx.os.environ.get('UNDECLARED_KEY'))
+  print('PREDECLARED_KEY=%s' % rctx.os.environ.get('PREDECLARED_KEY'))
+  print('LAZYEVAL_KEY=%s' % rctx.getenv('LAZYEVAL_KEY'))
+
+dummy_repository = repository_rule(
+  implementation = _impl,
+  attrs = {'build_file': attr.label()},
+  environ = ['PREDECLARED_KEY'],  # sic
+)
+EOF
+  cat > BUILD.dummy <<EOF
+filegroup(name='dummy', srcs=['BUILD'])
+EOF
+  touch BUILD
+  cat > WORKSPACE <<EOF
+load('//:repo.bzl', 'dummy_repository')
+dummy_repository(name = 'foo', build_file = '@@//:BUILD.dummy')
+EOF
+
+  # Baseline: DEBUG: UNDECLARED_KEY is logged to stderr.
+  UNDECLARED_KEY=val1 bazel query @foo//:BUILD 2>$TEST_log || fail 'Expected no-op build to succeed'
+  expect_log "UNDECLARED_KEY=val1"
+
+  # UNDECLARED_KEY is, well, undeclared.  This will be a no-op.
+  UNDECLARED_KEY=val2 bazel query @foo//:BUILD 2>$TEST_log || fail 'Expected no-op build to succeed'
+  expect_not_log "UNDECLARED_KEY"
+
+  #---
+
+  # Predeclared key.
+  PREDECLARED_KEY=wal1 bazel query @foo//:BUILD 2>$TEST_log || fail 'Expected no-op build to succeed'
+  expect_log "PREDECLARED_KEY=wal1"
+
+  # Predeclared key, no-op build.
+  PREDECLARED_KEY=wal1 bazel query @foo//:BUILD 2>$TEST_log || fail 'Expected no-op build to succeed'
+  expect_not_log "PREDECLARED_KEY"
+
+  # Predeclared key, new value -> refetch.
+  PREDECLARED_KEY=wal2 bazel query @foo//:BUILD 2>$TEST_log || fail 'Expected no-op build to succeed'
+  expect_log "PREDECLARED_KEY=wal2"
+
+  #---
+
+  # Side-effect key.
+  LAZYEVAL_KEY=xal1 bazel query @foo//:BUILD 2>$TEST_log || fail 'Expected no-op build to succeed'
+  expect_log "PREDECLARED_KEY=None"
+  expect_log "LAZYEVAL_KEY=xal1"
+
+  # Side-effect key, no-op build.
+  LAZYEVAL_KEY=xal1 bazel query @foo//:BUILD 2>$TEST_log || fail 'Expected no-op build to succeed'
+  expect_not_log "LAZYEVAL_KEY"
+
+  # Side-effect key, new value -> refetch.
+  LAZYEVAL_KEY=xal2 bazel query @foo//:BUILD 2>$TEST_log || fail 'Expected no-op build to succeed'
+  expect_log "LAZYEVAL_KEY=xal2"
+
+  # Ditto, but with --repo_env overriding environment.
+  LAZYEVAL_KEY=xal2 bazel query --repo_env=LAZYEVAL_KEY=xal3 @foo//:BUILD 2>$TEST_log || fail 'Expected no-op build to succeed'
+  expect_log "LAZYEVAL_KEY=xal3"
 }
 
 run_suite "external tests"

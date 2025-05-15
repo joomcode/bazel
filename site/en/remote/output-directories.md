@@ -3,6 +3,8 @@ Book: /_book.yaml
 
 # Output Directory Layout
 
+{% include "_buttons.html" %}
+
 This page covers requirements and layout for output directories.
 
 ## Requirements {:#requirements}
@@ -24,12 +26,14 @@ Requirements for an output directory layout:
 
 The solution that's currently implemented:
 
-* Bazel must be invoked from a directory containing a WORKSPACE file (the
-  "_workspace directory_"), or a subdirectory thereof. It reports an error if it
-  is not.
-* The _outputRoot_ directory defaults to `~/.cache/bazel` on Linux,
-  `/private/var/tmp` on macOS, and on Windows it defaults to `%HOME%` if set,
-  else `%USERPROFILE%` if set, else the result of calling
+* Bazel must be invoked from a directory containing a repo boundary file, or a
+  subdirectory thereof. In other words, Bazel must be invoked from inside a
+  [repository](../external/overview#repository). Otherwise, an error is
+  reported.
+* The _outputRoot_ directory defaults to `${XDG_CACHE_HOME}/bazel` (or
+  `~/.cache/bazel`, if the `XDG_CACHE_HOME` environment variable is not set) on
+  Linux, `/private/var/tmp` on macOS, and on Windows it defaults to `%HOME%` if
+  set, else `%USERPROFILE%` if set, else the result of calling
   `SHGetKnownFolderPath()` with the `FOLDERID_Profile` flag set. If the
   environment variable `$TEST_TMPDIR` is set, as in a test of Bazel itself,
   then that value overrides the default.
@@ -40,10 +44,11 @@ The solution that's currently implemented:
   installation manifest.
 * Beneath the `outputUserRoot` directory, an `outputBase` directory
   is also created whose name is the MD5 hash of the path name of the workspace
-  directory. So, for example, if Bazel is running in the workspace directory
+  root. So, for example, if Bazel is running in the workspace root
   `/home/user/src/my-project` (or in a directory symlinked to that one), then
   an output base directory is created called:
-  `/home/user/.cache/bazel/_bazel_user/7ffd56a6e4cb724ea575aba15733d113`.
+  `/home/user/.cache/bazel/_bazel_user/7ffd56a6e4cb724ea575aba15733d113`. You
+  can also run `echo -n $(pwd) | md5sum` in the workspace root to get the MD5.
 * You can use Bazel's `--output_base` startup option to override the default
   output base directory. For example,
   `bazel --output_base=/tmp/bazel/output build x/y:z`.
@@ -55,14 +60,14 @@ The symlinks for "bazel-&lt;workspace-name&gt;", "bazel-out", "bazel-testlogs",
 and "bazel-bin" are put in the workspace directory; these symlinks point to some
 directories inside a target-specific directory inside the output directory.
 These symlinks are only for the user's convenience, as Bazel itself does not
-use them. Also, this is done only if the workspace directory is writable.
+use them. Also, this is done only if the workspace root is writable.
 
 ## Layout diagram {:#layout-diagram}
 
 The directories are laid out as follows:
 
 <pre>
-&lt;workspace-name&gt;/                         <== The workspace directory
+&lt;workspace-name&gt;/                         <== The workspace root
   bazel-my-project => <...my-project>     <== Symlink to execRoot
   bazel-out => <...bin>                   <== Convenience symlink to outputPath
   bazel-bin => <...bin>                   <== Convenience symlink to most recent written bin dir $(BINDIR)
@@ -76,8 +81,8 @@ The directories are laid out as follows:
         _embedded_binaries/               <== Contains binaries and scripts unpacked from the data section of
                                               the bazel executable on first run (such as helper scripts and the
                                               main Java file BazelServer_deploy.jar)
-    7ffd56a6e4cb724ea575aba15733d113/     <== Hash of the client's workspace directory (such as
-                                              /home/some-user/src/my-project): outputBase
+    7ffd56a6e4cb724ea575aba15733d113/     <== Hash of the client's workspace root (such as
+                                              /home/user/src/my-project): outputBase
       action_cache/                       <== Action cache directory hierarchy
                                               This contains the persistent record of the file
                                               metadata (timestamps, and perhaps eventually also MD5
@@ -97,9 +102,9 @@ The directories are laid out as follows:
                                               actions run in a directory that mimics execroot.
                                               Implementation details, such as where the directories
                                               are created, are intentionally hidden from the action.
-                                              All actions can access its inputs and outputs relative
+                                              Every action can access its inputs and outputs relative
                                               to the execroot directory.
-        &lt;workspace-name&gt;/                 <== Working tree for the Bazel build & root of symlink forest: execRoot
+        _main/                            <== Working tree for the Bazel build & root of symlink forest: execRoot
           _bin/                           <== Helper tools are linked from or copied to here.
 
           bazel-out/                      <== All actual output of the build is under here: outputPath
@@ -113,7 +118,7 @@ The directories are laid out as follows:
                                               //foo/bar:baz
                 foo/bar/baz.runfiles/     <== The runfiles symlink farm for the //foo/bar:baz executable.
                   MANIFEST
-                  &lt;workspace-name&gt;/
+                  _main/
                     ...
               genfiles/                   <== Bazel puts generated source for the target configuration here:
                                               $(GENDIR)

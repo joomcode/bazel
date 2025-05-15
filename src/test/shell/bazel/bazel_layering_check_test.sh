@@ -31,6 +31,12 @@ cc_binary(
 )
 
 cc_library(
+  name = 'hello_header_only',
+  hdrs = ['hello_header_only.h'],
+  deps = [":hello_lib"],
+)
+
+cc_library(
   name = "hello_lib",
   srcs = ["hello_private.h", "hellolib.cc"],
   hdrs = ["hello.h"],
@@ -116,11 +122,72 @@ int main() {
 }
 #endif
 EOF
+
+  cat >hello/hello_header_only.h <<EOF
+#ifdef private_header
+#include "hello_private.h"
+int func() {
+  return helloPrivate() - 42;
+}
+#elif defined layering_violation
+#include "base.h"
+int func() {
+  return base() - 42;
+}
+#else
+#include "hello.h"
+int func() {
+  return hello() - 42;
+}
+#endif
+EOF
 }
 
-# TODO(hlopko): Add a test for a "toplevel" header-only library
-#   once we have parse_headers support in cc_configure.
 function test_bazel_layering_check() {
+  local -r clang_tool=$(which clang)
+  if [[ ! -x ${clang_tool:-/usr/bin/clang_tool} ]]; then
+    echo "clang not installed. Skipping test."
+    return
+  fi
+
+  write_files
+
+  CC="${clang_tool}" bazel build \
+    //hello:hello --features=layering_check \
+    &> "${TEST_log}" || fail "Build with layering_check failed"
+
+  bazel-bin/hello/hello || fail "the built binary failed to run"
+
+  if [[ ! -e bazel-bin/hello/hello.cppmap ]]; then
+    fail "module map files were not generated"
+  fi
+
+  if [[ ! -e bazel-bin/hello/hello_lib.cppmap ]]; then
+    fail "module map files were not generated"
+  fi
+
+  CC="${clang_tool}" bazel build \
+    //hello:hello --copt=-DFORCE_REBUILD=1 \
+    --spawn_strategy=local --features=layering_check \
+    &> "${TEST_log}" || fail "Build with layering_check failed without sandboxing"
+
+  CC="${clang_tool}" bazel build \
+    --copt=-D=private_header \
+    //hello:hello --features=layering_check \
+    &> "${TEST_log}" && fail "Build of private header violation with "\
+    "layering_check should have failed"
+  expect_log "use of private header from outside its module: 'hello_private.h'"
+
+  CC="${clang_tool}" bazel build --experimental_cc_implementation_deps \
+    --copt=-D=layering_violation \
+    //hello:hello --features=layering_check \
+    &> "${TEST_log}" && fail "Build of private header violation with "\
+    "layering_check should have failed"
+  expect_log "module //hello:hello does not depend on a module exporting "\
+    "'base.h'"
+}
+
+function test_bazel_layering_check_header_only() {
   if is_darwin; then
     echo "This test doesn't run on Darwin. Skipping."
     return
@@ -134,36 +201,34 @@ function test_bazel_layering_check() {
 
   write_files
 
-  CC="${clang_tool}" bazel build --experimental_cc_implementation_deps \
-    //hello:hello --linkopt=-fuse-ld=gold --features=layering_check \
-    &> "${TEST_log}" || fail "Build with layering_check failed"
+  CC="${clang_tool}" bazel build \
+    //hello:hello_header_only --features=layering_check --features=parse_headers \
+    -s --process_headers_in_dependencies \
+    &> "${TEST_log}" || fail "Build with layering_check + parse_headers failed"
 
-  bazel-bin/hello/hello || fail "the built binary failed to run"
-
-  if [[ ! -e bazel-bin/hello/hello.cppmap ]]; then
-    fail "module map files were not generated"
+  if [[ ! -e bazel-bin/hello/hello_header_only.cppmap ]]; then
+    fail "module map file for hello_header_only was not generated"
   fi
 
   if [[ ! -e bazel-bin/hello/hello_lib.cppmap ]]; then
-    fail "module map files were not generated"
+    fail "module map file for hello_lib was not generated"
   fi
 
-  # Specifying -fuse-ld=gold explicitly to override -fuse-ld=/usr/bin/ld.gold
-  # passed in by cc_configure because Ubuntu-16.04 ships with an old
-  # clang version that doesn't accept that.
-  CC="${clang_tool}" bazel build --experimental_cc_implementation_deps \
+  CC="${clang_tool}" bazel build \
     --copt=-D=private_header \
-    //hello:hello --linkopt=-fuse-ld=gold --features=layering_check \
+    //hello:hello_header_only --features=layering_check --features=parse_headers \
+    --process_headers_in_dependencies \
     &> "${TEST_log}" && fail "Build of private header violation with "\
-    "layering_check should have failed"
+    "layering_check + parse_headers should have failed"
   expect_log "use of private header from outside its module: 'hello_private.h'"
 
-  CC="${clang_tool}" bazel build --experimental_cc_implementation_deps \
+  CC="${clang_tool}" bazel build \
     --copt=-D=layering_violation \
-    //hello:hello --linkopt=-fuse-ld=gold --features=layering_check \
+    //hello:hello_header_only --features=layering_check --features=parse_headers \
+    --process_headers_in_dependencies \
     &> "${TEST_log}" && fail "Build of private header violation with "\
-    "layering_check should have failed"
-  expect_log "module //hello:hello does not depend on a module exporting "\
+    "layering_check + parse_headers should have failed"
+  expect_log "module //hello:hello_header_only does not depend on a module exporting "\
     "'base.h'"
 }
 

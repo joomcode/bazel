@@ -25,7 +25,7 @@ import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
-import com.google.devtools.build.lib.rules.cpp.CppFileTypes;
+import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.util.ArrayList;
@@ -87,6 +87,8 @@ public class JavaTargetAttributes {
     @Nullable private String injectingRuleKind;
 
     private final NestedSetBuilder<Artifact> excludedArtifacts = NestedSetBuilder.naiveLinkOrder();
+
+    private boolean prependDirectJars = true;
 
     private boolean built = false;
 
@@ -179,6 +181,24 @@ public class JavaTargetAttributes {
       return this;
     }
 
+    /**
+     * Avoids prepending the direct jars to the compile-time classpath when building the attributes,
+     * assuming that they have already been prepended. This avoids creating a new {@link NestedSet}
+     * instance.
+     *
+     * <p>After this method is called, {@link #addDirectJar(Artifact)} and {@link
+     * #addDirectJars(NestedSet)} will throw an exception.
+     */
+    @CanIgnoreReturnValue
+    public Builder setCompileTimeClassPathEntriesWithPrependedDirectJars(
+        NestedSet<Artifact> entries) {
+      Preconditions.checkArgument(!built);
+      Preconditions.checkArgument(compileTimeClassPathBuilder.isEmpty());
+      prependDirectJars = false;
+      compileTimeClassPathBuilder.addTransitive(entries);
+      return this;
+    }
+
     @CanIgnoreReturnValue
     public Builder setTargetLabel(Label targetLabel) {
       Preconditions.checkArgument(!built);
@@ -200,7 +220,7 @@ public class JavaTargetAttributes {
      * instance overrides the default bootclasspath.
      */
     @CanIgnoreReturnValue
-    public Builder setBootClassPath(BootClassPathInfo bootClassPath) {
+    public Builder setBootClassPath(BootClassPathInfo bootClassPath) throws RuleErrorException {
       Preconditions.checkArgument(!built);
       Preconditions.checkArgument(!bootClassPath.isEmpty());
       Preconditions.checkState(this.bootClassPath.isEmpty());
@@ -251,6 +271,7 @@ public class JavaTargetAttributes {
     @CanIgnoreReturnValue
     public Builder addDirectJars(NestedSet<Artifact> directJars) {
       Preconditions.checkArgument(!built);
+      Preconditions.checkArgument(prependDirectJars);
       this.directJarsBuilder.addTransitive(directJars);
       return this;
     }
@@ -258,6 +279,7 @@ public class JavaTargetAttributes {
     @CanIgnoreReturnValue
     public Builder addDirectJar(Artifact directJar) {
       Preconditions.checkArgument(!built);
+      Preconditions.checkArgument(prependDirectJars);
       this.directJarsBuilder.add(directJar);
       return this;
     }
@@ -266,30 +288,6 @@ public class JavaTargetAttributes {
     public Builder addCompileTimeDependencyArtifacts(NestedSet<Artifact> dependencyArtifacts) {
       Preconditions.checkArgument(!built);
       compileTimeDependencyArtifacts.addTransitive(dependencyArtifacts);
-      return this;
-    }
-
-    @CanIgnoreReturnValue
-    public Builder addNativeLibrary(Artifact nativeLibrary) {
-      Preconditions.checkArgument(!built);
-      String name = nativeLibrary.getFilename();
-      if (CppFileTypes.INTERFACE_SHARED_LIBRARY.matches(name)) {
-        return this;
-      }
-      if (!(CppFileTypes.SHARED_LIBRARY.matches(name)
-          || CppFileTypes.VERSIONED_SHARED_LIBRARY.matches(name))) {
-        throw new IllegalArgumentException("not a shared library :" + nativeLibrary.prettyPrint());
-      }
-      nativeLibraries.add(nativeLibrary);
-      return this;
-    }
-
-    @CanIgnoreReturnValue
-    public Builder addNativeLibraries(Iterable<Artifact> nativeLibraries) {
-      Preconditions.checkArgument(!built);
-      for (Artifact nativeLibrary : nativeLibraries) {
-        addNativeLibrary(nativeLibrary);
-      }
       return this;
     }
 
@@ -335,13 +333,6 @@ public class JavaTargetAttributes {
       return this;
     }
 
-    @CanIgnoreReturnValue
-    public Builder addClassPathResource(Artifact classPathResource) {
-      Preconditions.checkArgument(!built);
-      this.classPathResources.add(classPathResource);
-      return this;
-    }
-
     /** Adds additional outputs to this target's compile action. */
     @CanIgnoreReturnValue
     public Builder addAdditionalOutputs(Iterable<Artifact> outputs) {
@@ -354,10 +345,12 @@ public class JavaTargetAttributes {
       built = true;
       NestedSet<Artifact> directJars = directJarsBuilder.build();
       NestedSet<Artifact> compileTimeClassPath =
-          NestedSetBuilder.<Artifact>naiveLinkOrder()
-              .addTransitive(directJars)
-              .addTransitive(compileTimeClassPathBuilder.build())
-              .build();
+          prependDirectJars
+              ? NestedSetBuilder.<Artifact>naiveLinkOrder()
+                  .addTransitive(directJars)
+                  .addTransitive(compileTimeClassPathBuilder.build())
+                  .build()
+              : compileTimeClassPathBuilder.build();
       return new JavaTargetAttributes(
           ImmutableSet.copyOf(sourceFiles),
           runtimeClassPath.build(),
@@ -595,10 +588,6 @@ public class JavaTargetAttributes {
         || !messages.isEmpty()
         || !classPathResources.isEmpty()
         || !resourceJars.isEmpty();
-  }
-
-  public boolean hasMessages() {
-    return !messages.isEmpty();
   }
 
   public Label getTargetLabel() {

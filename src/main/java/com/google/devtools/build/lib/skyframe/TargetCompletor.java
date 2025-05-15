@@ -32,6 +32,7 @@ import com.google.devtools.build.lib.skyframe.CompletionFunction.Completor;
 import com.google.devtools.build.lib.skyframe.TargetCompletionValue.TargetCompletionKey;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunction.Environment;
+import java.util.function.Supplier;
 import javax.annotation.Nullable;
 import net.starlark.java.syntax.Location;
 
@@ -49,13 +50,15 @@ class TargetCompletor
       PathResolverFactory pathResolverFactory,
       SkyframeActionExecutor skyframeActionExecutor,
       MetadataConsumerForMetrics.FilesMetricConsumer topLevelArtifactsMetric,
-      BugReporter bugReporter) {
+      BugReporter bugReporter,
+      Supplier<Boolean> isSkymeld) {
     return new CompletionFunction<>(
         pathResolverFactory,
         new TargetCompletor(skyframeActionExecutor),
         skyframeActionExecutor,
         topLevelArtifactsMetric,
-        bugReporter);
+        bugReporter,
+        isSkymeld);
   }
 
   private TargetCompletor(SkyframeActionExecutor announceTargetSummaries) {
@@ -70,7 +73,7 @@ class TargetCompletor
     ConfiguredTargetAndData configuredTargetAndData =
         ConfiguredTargetAndData.fromConfiguredTargetInSkyframe(ctValue.getConfiguredTarget(), env);
     return Event.error(
-        configuredTargetAndData == null ? null : configuredTargetAndData.getTarget().getLocation(),
+        configuredTargetAndData == null ? null : configuredTargetAndData.getLocation(),
         String.format("%s: %s", key.actionLookupKey().getLabel(), rootCause.getMessage()));
   }
 
@@ -81,9 +84,7 @@ class TargetCompletor
       throws InterruptedException {
     ConfiguredTargetAndData configuredTargetAndData =
         ConfiguredTargetAndData.fromConfiguredTargetInSkyframe(value.getConfiguredTarget(), env);
-    return configuredTargetAndData == null
-        ? null
-        : configuredTargetAndData.getTarget().getLocation();
+    return configuredTargetAndData == null ? null : configuredTargetAndData.getLocation();
   }
 
   @Override
@@ -103,7 +104,7 @@ class TargetCompletor
   @Override
   @Nullable
   public ExtendedEventHandler.Postable createFailed(
-      ConfiguredTargetValue value,
+      TargetCompletionKey skyKey,
       NestedSet<Cause> rootCauses,
       CompletionContext ctx,
       ImmutableMap<String, ArtifactsInOutputGroup> outputs,
@@ -142,7 +143,7 @@ class TargetCompletor
         env.getListener()
             .handle(
                 Event.warn(
-                    configuredTargetAndData.getTarget().getLocation(),
+                    configuredTargetAndData.getLocation(),
                     target.getLabel()
                         + " is a source file, nothing will be built for it. If you want to build a"
                         + " target that consumes this file, try --compile_one_dependency"));

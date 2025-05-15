@@ -39,8 +39,6 @@ public final class MockObjcSupport {
           "tvos_x86_64",
           "tvos_arm64");
 
-  private static final ImmutableList<String> DEFAULT_OSX_CROSSTOOL_DEPS_DIRS =
-      ImmutableList.of("third_party/bazel/tools/osx/crosstool");
   public static final String DEFAULT_OSX_CROSSTOOL_DIR = "tools/osx/crosstool";
   private static final String MOCK_OSX_TOOLCHAIN_CONFIG_PATH =
       "com/google/devtools/build/lib/packages/util/mock/osx_cc_toolchain_config.bzl";
@@ -143,7 +141,7 @@ public final class MockObjcSupport {
     // Any device, simulator or maccatalyst platforms created by Apple tests should consider
     // building on one of these targets as parents, to ensure that the proper constraints are set.
     config.create(
-        TestConstants.CONSTRAINTS_PATH + "/apple/BUILD",
+        TestConstants.APPLE_PLATFORM_PATH + "/BUILD",
         "package(default_visibility=['//visibility:public'])",
         "licenses(['notice'])",
         "platform(",
@@ -159,25 +157,32 @@ public final class MockObjcSupport {
         "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:ios',",
         "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:arm64',",
         "  ],",
-        ")",
-        "platform(",
-        "  name = 'ios_x86_64',",
-        "  constraint_values = [",
-        "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:ios',",
-        "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:x86_64',",
-        "  ],",
-        ")",
-        "platform(",
-        "  name = 'watchos_x86_64',",
-        "  constraint_values = [",
-        "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:watchos',",
-        "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:x86_64',",
-        "  ],",
         ")");
 
-    for (String tool :
-        ImmutableSet.of(
-            "objc_dummy.mm", "gcov", "testrunner", "xcrunwrapper.sh", "mcov", "libtool")) {
+    String[] simulatorPlatforms = {
+      "platform(",
+      "  name = 'ios_x86_64',",
+      "  constraint_values = [",
+      "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:ios',",
+      "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:x86_64',",
+      "  ],",
+      ")",
+      "platform(",
+      "  name = 'watchos_x86_64',",
+      "  constraint_values = [",
+      "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:watchos',",
+      "    '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:x86_64',",
+      "  ],",
+      ")"
+    };
+
+    if (TestConstants.PRODUCT_NAME.equals("bazel")) {
+      config.append(TestConstants.APPLE_PLATFORM_PATH + "/BUILD", simulatorPlatforms);
+    } else {
+      config.create(TestConstants.APPLE_PLATFORM_PATH + "/simulator/BUILD", simulatorPlatforms);
+    }
+
+    for (String tool : ImmutableSet.of("objc_dummy.mm", "gcov", "testrunner", "mcov", "libtool")) {
       config.create(TestConstants.TOOLS_REPOSITORY_SCRATCH + "tools/objc/" + tool);
     }
     config.create(
@@ -185,7 +190,6 @@ public final class MockObjcSupport {
         "package(default_visibility=['//visibility:public'])",
         "exports_files(glob(['**']))",
         "filegroup(name = 'default_provisioning_profile', srcs = ['foo.mobileprovision'])",
-        "sh_binary(name = 'xcrunwrapper', srcs = ['xcrunwrapper.sh'])",
         "filegroup(name = 'xctest_infoplist', srcs = ['xctest.plist'])",
         "py_binary(",
         "  name = 'j2objc_dead_code_pruner_binary',",
@@ -235,9 +239,6 @@ public final class MockObjcSupport {
   public static void setupCcToolchainConfig(
       MockToolsConfig config, CcToolchainConfig.Builder ccToolchainConfig) throws IOException {
     if (config.isRealFileSystem()) {
-      for (String depDir : DEFAULT_OSX_CROSSTOOL_DEPS_DIRS) {
-        config.linkTools(depDir);
-      }
       config.linkTools(DEFAULT_OSX_CROSSTOOL_DIR);
     } else {
       CcToolchainConfig toolchainConfig = ccToolchainConfig.build();
@@ -250,7 +251,7 @@ public final class MockObjcSupport {
       new Crosstool(
               config,
               DEFAULT_OSX_CROSSTOOL_DIR,
-              Label.parseAbsoluteUnchecked("@bazel_tools//tools/osx"))
+              Label.parseCanonicalUnchecked("@bazel_tools//tools/osx"))
           .setCcToolchainFile(readCcToolchainConfigFile())
           .setSupportedArchs(OSX_ARCHS)
           .setToolchainConfigs(toolchainConfigBuilder.build())
@@ -261,15 +262,12 @@ public final class MockObjcSupport {
 
   public static void setupCcToolchainConfig(MockToolsConfig config) throws IOException {
     if (config.isRealFileSystem()) {
-      for (String depDir : DEFAULT_OSX_CROSSTOOL_DEPS_DIRS) {
-        config.linkTools(depDir);
-      }
       config.linkTools(DEFAULT_OSX_CROSSTOOL_DIR);
     } else {
       new Crosstool(
               config,
               DEFAULT_OSX_CROSSTOOL_DIR,
-              Label.parseAbsoluteUnchecked("@bazel_tools//tools/osx"))
+              Label.parseCanonicalUnchecked("@bazel_tools//tools/osx"))
           .setCcToolchainFile(readCcToolchainConfigFile())
           .setSupportedArchs(OSX_ARCHS)
           .setToolchainConfigs(getDefaultCcToolchainConfigs())

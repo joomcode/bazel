@@ -70,13 +70,6 @@ public class WindowsFileSystem extends JavaIoFileSystem {
   }
 
   @Override
-  public void renameTo(PathFragment sourcePath, PathFragment targetPath) throws IOException {
-    // Make sure the target path doesn't exist to avoid permission denied error on Windows.
-    delete(targetPath);
-    super.renameTo(sourcePath, targetPath);
-  }
-
-  @Override
   protected void createSymbolicLink(PathFragment linkPath, PathFragment targetFragment)
       throws IOException {
     PathFragment targetPath =
@@ -156,6 +149,8 @@ public class WindowsFileSystem extends JavaIoFileSystem {
     }
 
     final boolean isSymbolicLink = !followSymlinks && fileIsSymbolicLink(file);
+    final long lastChangeTime =
+        WindowsFileOperations.getLastChangeTime(getNioPath(path).toString(), followSymlinks);
     FileStatus status =
         new FileStatus() {
           @Override
@@ -182,25 +177,30 @@ public class WindowsFileSystem extends JavaIoFileSystem {
           }
 
           @Override
-          public long getSize() throws IOException {
+          public long getSize() {
             return attributes.size();
           }
 
           @Override
-          public long getLastModifiedTime() throws IOException {
+          public long getLastModifiedTime() {
             return attributes.lastModifiedTime().toMillis();
           }
 
           @Override
           public long getLastChangeTime() {
-            // This is the best we can do with Java NIO...
-            return attributes.lastModifiedTime().toMillis();
+            return lastChangeTime;
           }
 
           @Override
           public long getNodeId() {
             // TODO(bazel-team): Consider making use of attributes.fileKey().
             return -1;
+          }
+
+          @Override
+          public int getPermissions() {
+            // Files on Windows are implicitly readable and executable.
+            return 0555 | (attributes.isReadOnly() ? 0 : 0200);
           }
         };
 
@@ -219,6 +219,29 @@ public class WindowsFileSystem extends JavaIoFileSystem {
       }
     }
     return super.isDirectory(path, followSymlinks);
+  }
+
+  @Override
+  protected void setReadable(PathFragment path, boolean readable) {
+    // Windows does not have a notion of readable files.
+    // https://github.com/openjdk/jdk/blob/e52a2aeeacaeb26c801b6e31f8e67e61b1ea2de3/src/java.base/windows/native/libjava/WinNTFileSystem_md.c#L473-L476
+  }
+
+  @Override
+  protected void setExecutable(PathFragment path, boolean executable) {
+    // Windows does not have a notion of executable files.
+    // https://github.com/openjdk/jdk/blob/e52a2aeeacaeb26c801b6e31f8e67e61b1ea2de3/src/java.base/windows/native/libjava/WinNTFileSystem_md.c#L473-L476
+  }
+
+  @Override
+  public void setWritable(PathFragment path, boolean writable) throws IOException {
+    // Windows does not have a notion of read-only directories.
+    // See https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants.
+    // JavaIoFileSystem#setWritable(dir, true) would throw, so reimplement it here as a no-op.
+    if (isDirectory(path, /* followSymlinks= */ true)) {
+      return;
+    }
+    super.setWritable(path, writable);
   }
 
   /**

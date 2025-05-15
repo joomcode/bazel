@@ -33,7 +33,7 @@ import com.google.common.util.concurrent.MoreExecutors;
 import com.google.devtools.build.lib.remote.options.RemoteOptions;
 import com.google.devtools.build.lib.remote.util.DigestUtil;
 import com.google.devtools.build.lib.remote.util.TracingMetadataUtils;
-import com.google.devtools.build.lib.sandbox.LinuxSandboxUtil;
+import com.google.devtools.build.lib.sandbox.LinuxSandboxCommandLineBuilder;
 import com.google.devtools.build.lib.shell.Command;
 import com.google.devtools.build.lib.shell.CommandException;
 import com.google.devtools.build.lib.shell.CommandResult;
@@ -323,7 +323,7 @@ public final class RemoteWorker {
       b.group(bossGroup, workerGroup)
           .channel(NioServerSocketChannel.class)
           .handler(new LoggingHandler(LogLevel.INFO))
-          .childHandler(new HttpCacheServerInitializer());
+          .childHandler(new HttpCacheServerInitializer(new OnDiskHttpCacheServerHandler(cache)));
       ch = b.bind(remoteWorkerOptions.httpListenPort).sync().channel();
       logger.atInfo().log(
           "Started HTTP cache server on port %d", remoteWorkerOptions.httpListenPort);
@@ -383,8 +383,8 @@ public final class RemoteWorker {
     CommandResult cmdResult = null;
     Command cmd =
         new Command(
-            LinuxSandboxUtil.commandLineBuilder(sandboxPath, ImmutableList.of("true"))
-                .build()
+            LinuxSandboxCommandLineBuilder.commandLineBuilder(sandboxPath)
+                .buildForCommand(ImmutableList.of("true"))
                 .toArray(new String[0]),
             ImmutableMap.of(),
             sandboxPath.getParentDirectory().getPathFile());

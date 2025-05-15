@@ -15,9 +15,8 @@ package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Interner;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
-import com.google.devtools.build.lib.concurrent.BlazeInterners;
+import com.google.devtools.build.lib.skyframe.serialization.VisibleForSerialization;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.SerializationConstant;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -30,7 +29,7 @@ import com.google.devtools.build.skyframe.SkyValue;
 public class IgnoredPackagePrefixesValue implements SkyValue {
   private final ImmutableSet<PathFragment> patterns;
 
-  @SerializationConstant @AutoCodec.VisibleForSerialization
+  @SerializationConstant @VisibleForSerialization
   public static final IgnoredPackagePrefixesValue EMPTY_LIST =
       new IgnoredPackagePrefixesValue(ImmutableSet.of());
 
@@ -70,16 +69,16 @@ public class IgnoredPackagePrefixesValue implements SkyValue {
     return false;
   }
 
-  @AutoCodec.VisibleForSerialization
+  @VisibleForSerialization
   @AutoCodec
   static class Key extends AbstractSkyKey<RepositoryName> {
-    private static final Interner<Key> interner = BlazeInterners.newWeakInterner();
+    private static final SkyKeyInterner<Key> interner = SkyKey.newInterner();
 
     private Key(RepositoryName arg) {
       super(arg);
     }
 
-    @AutoCodec.VisibleForSerialization
+    @VisibleForSerialization
     @AutoCodec.Instantiator
     static Key create(RepositoryName arg) {
       return interner.intern(new Key(arg));
@@ -88,6 +87,11 @@ public class IgnoredPackagePrefixesValue implements SkyValue {
     @Override
     public SkyFunctionName functionName() {
       return SkyFunctions.IGNORED_PACKAGE_PREFIXES;
+    }
+
+    @Override
+    public SkyKeyInterner<Key> getSkyKeyInterner() {
+      return interner;
     }
   }
 }

@@ -24,11 +24,15 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.ActionInput;
+import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.actions.CommandLines.ParamFileActionInput;
 import com.google.devtools.build.lib.actions.ParameterFile.ParameterFileType;
+import com.google.devtools.build.lib.actions.PathMapper;
+import com.google.devtools.build.lib.actions.Spawn;
 import com.google.devtools.build.lib.actions.cache.VirtualActionInput;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.exec.BinTools;
+import com.google.devtools.build.lib.exec.util.SpawnBuilder;
 import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxInputs;
 import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxOutputs;
 import com.google.devtools.build.lib.testutil.Scratch;
@@ -158,7 +162,7 @@ public class SandboxHelpersTest {
               try {
                 sandboxHelpers.processInputFiles(inputMap(input), customExecRoot);
                 finishProcessingSemaphore.release();
-              } catch (IOException e) {
+              } catch (IOException | InterruptedException e) {
                 throw new IllegalArgumentException(e);
               }
             });
@@ -187,8 +191,7 @@ public class SandboxHelpersTest {
             ParameterFileType.UNQUOTED,
             UTF_8);
 
-    SandboxHelpers.atomicallyWriteVirtualInput(
-        paramFile, scratch.resolve("/outputs/paramFile"), "-1234");
+    paramFile.atomicallyWriteRelativeTo(scratch.resolve("/outputs"), "-1234");
 
     assertThat(scratch.resolve("/outputs").readdir(Symlinks.NOFOLLOW))
         .containsExactly(new Dirent("paramFile", Dirent.Type.FILE));
@@ -203,11 +206,11 @@ public class SandboxHelpersTest {
         new BinTools.PathActionInput(
             scratch.file("tool", "tool_code"), PathFragment.create("tools/tool"));
 
-    SandboxHelpers.atomicallyWriteVirtualInput(tool, scratch.resolve("/outputs/tool"), "-1234");
+    tool.atomicallyWriteRelativeTo(scratch.resolve("/outputs"), "-1234");
 
     assertThat(scratch.resolve("/outputs").readdir(Symlinks.NOFOLLOW))
-        .containsExactly(new Dirent("tool", Dirent.Type.FILE));
-    Path outputFile = scratch.resolve("/outputs/tool");
+        .containsExactly(new Dirent("tools", Dirent.Type.DIRECTORY));
+    Path outputFile = scratch.resolve("/outputs/tools/tool");
     assertThat(FileSystemUtils.readLines(outputFile, UTF_8)).containsExactly("tool_code");
     assertThat(outputFile.isExecutable()).isTrue();
   }
@@ -216,7 +219,12 @@ public class SandboxHelpersTest {
   public void atomicallyWriteVirtualInput_writesArbitraryVirtualInput() throws Exception {
     VirtualActionInput input = ActionsTestUtil.createVirtualActionInput("file", "hello");
 
-    SandboxHelpers.atomicallyWriteVirtualInput(input, scratch.resolve("/outputs/file"), "-1234");
+    // Store an existing directory at the location where atomicallyWriteTo()
+    // writes its temporary file. It should be removed prior to the creation of
+    // the temporary file.
+    scratch.resolve("/outputs/file-1234").createDirectoryAndParents();
+
+    input.atomicallyWriteRelativeTo(scratch.resolve("/outputs"), "-1234");
 
     assertThat(scratch.resolve("/outputs").readdir(Symlinks.NOFOLLOW))
         .containsExactly(new Dirent("file", Dirent.Type.FILE));
@@ -226,8 +234,8 @@ public class SandboxHelpersTest {
   }
 
   @Test
-  public void cleanExisting_updatesDirs() throws IOException {
-    Path inputTxt = scratch.getFileSystem().getPath("/hello.txt");
+  public void cleanExisting_updatesDirs() throws IOException, InterruptedException {
+    Path inputTxt = scratch.getFileSystem().getPath(PathFragment.create("/hello.txt"));
     Path rootDir = execRoot.getParentDirectory();
     PathFragment input1 = PathFragment.create("existing/directory/with/input1.txt");
     PathFragment input2 = PathFragment.create("partial/directory/input2.txt");
@@ -246,11 +254,7 @@ public class SandboxHelpersTest {
         Iterables.concat(
             ImmutableSet.of(), inputs.getFiles().keySet(), inputs.getSymlinks().keySet()),
         SandboxOutputs.create(
-                ImmutableSet.of(PathFragment.create("out/dir/output.txt")), ImmutableSet.of())
-            .files(),
-        SandboxOutputs.create(
-                ImmutableSet.of(PathFragment.create("out/dir/output.txt")), ImmutableSet.of())
-            .dirs());
+            ImmutableSet.of(PathFragment.create("out/dir/output.txt")), ImmutableSet.of()));
 
     PathFragment inputDir1 = input1.getParentDirectory();
     PathFragment inputDir2 = input2.getParentDirectory();
@@ -271,7 +275,18 @@ public class SandboxHelpersTest {
     // outputDir only exists partially
     execRoot.getRelative(outputDir).getParentDirectory().createDirectoryAndParents();
     execRoot.getRelative("justSomeDir/thatIsDoomed").createDirectoryAndParents();
-    SandboxHelpers.cleanExisting(rootDir, inputs, inputsToCreate, dirsToCreate, execRoot);
+    // `thiswillbeafile/output` simulates a directory that was in the stashed dir but whose same
+    // path is used later for a regular file.
+    scratch.dir("/execRoot/thiswillbeafile/output");
+    scratch.file("/execRoot/thiswillbeafile/output/file1");
+    dirsToCreate.add(PathFragment.create("thiswillbeafile"));
+    PathFragment input4 = PathFragment.create("thiswillbeafile/output");
+    SandboxInputs inputs2 =
+        new SandboxInputs(
+            ImmutableMap.of(input1, inputTxt, input2, inputTxt, input3, inputTxt, input4, inputTxt),
+            ImmutableMap.of(),
+            ImmutableMap.of());
+    SandboxHelpers.cleanExisting(rootDir, inputs2, inputsToCreate, dirsToCreate, execRoot);
     assertThat(dirsToCreate).containsExactly(inputDir2, inputDir3, outputDir);
     assertThat(execRoot.getRelative("existing/directory/with").exists()).isTrue();
     assertThat(execRoot.getRelative("partial").exists()).isTrue();
@@ -280,5 +295,65 @@ public class SandboxHelpersTest {
     assertThat(execRoot.getRelative("justSomeDir/thatIsDoomed").exists()).isFalse();
     assertThat(execRoot.getRelative("out").exists()).isTrue();
     assertThat(execRoot.getRelative("out/dir").exists()).isFalse();
+  }
+
+  @Test
+  public void populateInputsAndDirsToCreate_createsMappedDirectories() {
+    ArtifactRoot outputRoot =
+        ArtifactRoot.asDerivedRoot(execRoot, ArtifactRoot.RootType.Output, "outputs");
+    ActionInput outputFile = ActionsTestUtil.createArtifact(outputRoot, "bin/config/dir/file");
+    ActionInput outputDir =
+        ActionsTestUtil.createTreeArtifactWithGeneratingAction(
+            outputRoot, "bin/config/other_dir/subdir");
+    PathMapper pathMapper =
+        execPath -> PathFragment.create(execPath.getPathString().replace("config/", ""));
+    Spawn spawn =
+        new SpawnBuilder().withOutputs(outputFile, outputDir).setPathMapper(pathMapper).build();
+    var sandboxHelpers = new SandboxHelpers();
+    LinkedHashSet<PathFragment> writableDirs = new LinkedHashSet<>();
+    LinkedHashSet<PathFragment> inputsToCreate = new LinkedHashSet<>();
+    LinkedHashSet<PathFragment> dirsToCreate = new LinkedHashSet<>();
+
+    SandboxHelpers.populateInputsAndDirsToCreate(
+        writableDirs,
+        inputsToCreate,
+        dirsToCreate,
+        ImmutableList.of(),
+        sandboxHelpers.getOutputs(spawn));
+
+    assertThat(writableDirs).isEmpty();
+    assertThat(inputsToCreate).isEmpty();
+    assertThat(dirsToCreate)
+        .containsExactly(
+            PathFragment.create("outputs/bin/dir"),
+            PathFragment.create("outputs/bin/other_dir/subdir"));
+  }
+
+  @Test
+  public void moveOutputs_mappedPathMovedToUnmappedPath() throws Exception {
+    PathFragment unmappedOutputPath = PathFragment.create("bin/config/output");
+    PathMapper pathMapper =
+        execPath -> PathFragment.create(execPath.getPathString().replace("config/", ""));
+    Spawn spawn =
+        new SpawnBuilder()
+            .withOutputs(unmappedOutputPath.getPathString())
+            .setPathMapper(pathMapper)
+            .build();
+    var sandboxHelpers = new SandboxHelpers();
+    Path sandboxBase = execRoot.getRelative("sandbox");
+    PathFragment mappedOutputPath = PathFragment.create("bin/output");
+    sandboxBase.getRelative(mappedOutputPath).getParentDirectory().createDirectoryAndParents();
+    FileSystemUtils.writeLinesAs(
+        sandboxBase.getRelative(mappedOutputPath), UTF_8, "hello", "pathmapper");
+
+    Path realBase = execRoot.getRelative("real");
+    SandboxHelpers.moveOutputs(sandboxHelpers.getOutputs(spawn), sandboxBase, realBase);
+
+    assertThat(
+            FileSystemUtils.readLines(
+                realBase.getRelative(unmappedOutputPath.getPathString()), UTF_8))
+        .containsExactly("hello", "pathmapper")
+        .inOrder();
+    assertThat(sandboxBase.getRelative(mappedOutputPath).exists()).isFalse();
   }
 }

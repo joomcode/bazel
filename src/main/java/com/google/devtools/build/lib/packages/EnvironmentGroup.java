@@ -14,6 +14,7 @@
 
 package com.google.devtools.build.lib.packages;
 
+import com.google.auto.value.AutoValue;
 import com.google.common.base.Predicate;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Iterables;
@@ -306,7 +307,7 @@ public class EnvironmentGroup implements Target {
 
   @Override
   public RuleVisibility getVisibility() {
-    return ConstantRuleVisibility.PRIVATE; // No rule should be referencing an environment_group.
+    return RuleVisibility.PRIVATE; // No rule should be referencing an environment_group.
   }
 
   @Override
@@ -316,5 +317,18 @@ public class EnvironmentGroup implements Target {
 
   public static String targetKind() {
     return "environment group";
+  }
+
+  @Override
+  public TargetData reduceForSerialization() {
+    return new AutoValue_EnvironmentGroup_EnvironmentGroupData(getLocation(), getLabel());
+  }
+
+  @AutoValue
+  abstract static class EnvironmentGroupData implements TargetData {
+    @Override
+    public final String getTargetKind() {
+      return targetKind();
+    }
   }
 }

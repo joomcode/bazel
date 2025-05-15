@@ -28,11 +28,12 @@ import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
-import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.ActionInput;
-import com.google.devtools.build.lib.actions.MetadataProvider;
+import com.google.devtools.build.lib.actions.ArtifactPathResolver;
+import com.google.devtools.build.lib.actions.InputMetadataProvider;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.SilentCloseable;
+import com.google.devtools.build.lib.remote.Scrubber.SpawnScrubber;
 import com.google.devtools.build.lib.remote.util.DigestUtil;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -42,6 +43,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.SortedMap;
 import java.util.SortedSet;
 import java.util.TreeMap;
@@ -50,6 +52,7 @@ import javax.annotation.Nullable;
 
 /** A merkle tree representation as defined by the remote execution api. */
 public class MerkleTree {
+  private static final String BAZEL_TOOL_INPUT_MARKER = "bazel_tool_input";
 
   /** A path or contents */
   public static class PathOrBytes {
@@ -211,20 +214,62 @@ public class MerkleTree {
    * @param inputs a map of path to input. The map is required to be sorted lexicographically by
    *     paths. Inputs of type tree artifacts are not supported and are expected to have been
    *     expanded before.
-   * @param metadataProvider provides metadata for all {@link ActionInput}s in {@code inputs}, as
-   *     well as any {@link ActionInput}s being discovered via directory expansion.
+   * @param inputMetadataProvider provides metadata for all {@link ActionInput}s in {@code inputs},
+   *     as well as any {@link ActionInput}s being discovered via directory expansion.
    * @param execRoot all paths in {@code inputs} need to be relative to this {@code execRoot}.
    * @param digestUtil a hashing utility
    */
   public static MerkleTree build(
       SortedMap<PathFragment, ActionInput> inputs,
-      MetadataProvider metadataProvider,
+      InputMetadataProvider inputMetadataProvider,
       Path execRoot,
+      ArtifactPathResolver artifactPathResolver,
+      @Nullable SpawnScrubber spawnScrubber,
       DigestUtil digestUtil)
       throws IOException {
     try (SilentCloseable c = Profiler.instance().profile("MerkleTree.build(ActionInput)")) {
       DirectoryTree tree =
-          DirectoryTreeBuilder.fromActionInputs(inputs, metadataProvider, execRoot, digestUtil);
+          DirectoryTreeBuilder.fromActionInputs(
+              inputs,
+              inputMetadataProvider,
+              execRoot,
+              artifactPathResolver,
+              spawnScrubber,
+              digestUtil);
+      return build(tree, digestUtil);
+    }
+  }
+
+  /**
+   * Constructs a merkle tree from a lexicographically sorted map of inputs (files).
+   *
+   * @param inputs a map of path to input. The map is required to be sorted lexicographically by
+   *     paths. Inputs of type tree artifacts are not supported and are expected to have been
+   *     expanded before.
+   * @param inputMetadataProvider provides metadata for all {@link ActionInput}s in {@code inputs},
+   *     as well as any {@link ActionInput}s being discovered via directory expansion.
+   * @param execRoot all paths in {@code inputs} need to be relative to this {@code execRoot}.
+   * @param digestUtil a hashing utility
+   */
+  public static MerkleTree build(
+      SortedMap<PathFragment, ActionInput> inputs,
+      Set<PathFragment> toolInputs,
+      InputMetadataProvider inputMetadataProvider,
+      Path execRoot,
+      ArtifactPathResolver artifactPathResolver,
+      @Nullable SpawnScrubber spawnScrubber,
+      DigestUtil digestUtil)
+      throws IOException {
+    try (SilentCloseable c = Profiler.instance().profile("MerkleTree.build(ActionInput)")) {
+      DirectoryTree tree =
+          DirectoryTreeBuilder.fromActionInputs(
+              inputs,
+              toolInputs,
+              inputMetadataProvider,
+              execRoot,
+              artifactPathResolver,
+              spawnScrubber,
+              digestUtil);
       return build(tree, digestUtil);
     }
   }
@@ -267,8 +312,7 @@ public class MerkleTree {
                     m.remove(subDirname), "subMerkleTree at '%s' was null", subDirname);
             subDirs.put(dir.getPathSegment(), subMerkleTree);
           }
-          MerkleTree mt =
-              buildMerkleTree(new TreeSet<>(files), new TreeSet<>(symlinks), subDirs, digestUtil);
+          MerkleTree mt = buildMerkleTree(files, symlinks, subDirs, digestUtil);
           m.put(dirname, mt);
         });
     MerkleTree rootMerkleTree = m.get(PathFragment.EMPTY_FRAGMENT);
@@ -294,11 +338,11 @@ public class MerkleTree {
     }
 
     // Some differ, do a full merge.
-    SortedSet<DirectoryTree.FileNode> files = Sets.newTreeSet();
+    SortedSet<DirectoryTree.FileNode> files = new TreeSet<>();
     for (MerkleTree merkleTree : merkleTrees) {
       files.addAll(merkleTree.getFiles());
     }
-    SortedSet<DirectoryTree.SymlinkNode> symlinks = Sets.newTreeSet();
+    SortedSet<DirectoryTree.SymlinkNode> symlinks = new TreeSet<>();
     for (MerkleTree merkleTree : merkleTrees) {
       symlinks.addAll(merkleTree.getSymlinks());
     }
@@ -354,11 +398,15 @@ public class MerkleTree {
   }
 
   private static FileNode buildProto(DirectoryTree.FileNode file) {
-    return FileNode.newBuilder()
-        .setName(decodeBytestringUtf8(file.getPathSegment()))
-        .setDigest(file.getDigest())
-        .setIsExecutable(file.isExecutable())
-        .build();
+    var node =
+        FileNode.newBuilder()
+            .setName(decodeBytestringUtf8(file.getPathSegment()))
+            .setDigest(file.getDigest())
+            .setIsExecutable(file.isExecutable());
+    if (file.isToolInput()) {
+      node.getNodePropertiesBuilder().addPropertiesBuilder().setName(BAZEL_TOOL_INPUT_MARKER);
+    }
+    return node.build();
   }
 
   private static DirectoryNode buildProto(String baseName, MerkleTree dir) {

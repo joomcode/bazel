@@ -1,13 +1,6 @@
 ---
 platforms:
-  centos7_java11_devtoolset10:
-    build_targets:
-      - "//src:bazel"
-      - "//src:bazel_nojdk"
-    build_flags:
-      - "-c"
-      - "opt"
-  ubuntu1804:
+  centos7:
     build_targets:
       - "//src:bazel"
       - "//src:bazel_nojdk"
@@ -15,6 +8,20 @@ platforms:
       - "-c"
       - "opt"
   ubuntu2004:
+    build_targets:
+      - "//src:bazel"
+      - "//src:bazel_nojdk"
+    build_flags:
+      - "-c"
+      - "opt"
+  ubuntu2004_arm64:
+    build_targets:
+      - "//src:bazel"
+      - "//src:bazel_nojdk"
+    build_flags:
+      - "-c"
+      - "opt"
+  ubuntu2204:
     build_targets:
       - "//src:bazel"
       - "//src:bazel_nojdk"
@@ -37,16 +44,12 @@ platforms:
     build_flags:
       - "-c"
       - "opt"
-      # TODO(pcloudy): Remove the following flag when we actually use Apple
-      # Silicon machines for macos_arm64 platform
-      - "--cpu=darwin_arm64"
   windows:
     build_flags:
       - "--copt=-w"
       - "--host_copt=-w"
-      # TODO(pcloudy): Disable opt build due to https://github.com/bazelbuild/bazel/issues/16225
-      # - "-c"
-      # - "opt"
+      - "-c"
+      - "opt"
     build_targets:
       - "//src:bazel.exe"
       - "//src:bazel_nojdk.exe"
@@ -54,10 +57,9 @@ platforms:
     build_flags:
       - "--copt=-w"
       - "--host_copt=-w"
-      # TODO(pcloudy): Disable opt build due to https://github.com/bazelbuild/bazel/issues/16225
-      # - "-c"
-      # - "opt"
-      - "--cpu=x64_arm64_windows"
+      - "-c"
+      - "opt"
+      - "--config=windows_arm64"
     build_targets:
       - "//src:bazel.exe"
       - "//src:bazel_nojdk.exe"

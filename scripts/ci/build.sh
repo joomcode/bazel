@@ -84,7 +84,7 @@ function generate_from_template() {
 # Generate the email for the release.
 # The first line of the output will be the recipient, the second line
 # the mail subjects and the subsequent lines the mail, its content.
-# If no planed release, then this function output will be empty.
+# If no planned release, then this function output will be empty.
 function generate_email() {
   RELEASE_CANDIDATE_URL="https://releases.bazel.build/%release_name%/rc%rc%/index.html"
   RELEASE_URL="https://github.com/bazelbuild/bazel/releases/tag/%release_name%"
@@ -146,15 +146,16 @@ function release_to_github() {
 
   local release_name=$(get_release_name)
   local rc=$(get_release_candidate)
+  local full_release_name=$(get_full_release_name)
+  local release_branch=$(get_release_branch)
 
-  if [ -n "${release_name}" ] && [ -z "${rc}" ]; then
+  if [ -n "${release_name}" ]; then
     local github_token="$(gsutil cat gs://bazel-trusted-encrypted-secrets/github-trusted-token.enc | \
         gcloud kms decrypt --project bazel-public --location global --keyring buildkite --key github-trusted-token --ciphertext-file - --plaintext-file -)"
-
-    if [ "$(is_rolling_release)" -eq 1 ]; then
-      GITHUB_TOKEN="${github_token}" github-release -prerelease "bazelbuild/bazel" "${release_name}" "" "$(get_release_page)" "${artifact_dir}/*"
-    else
+    if [ -z "${rc}" ]; then
       GITHUB_TOKEN="${github_token}" github-release "bazelbuild/bazel" "${release_name}" "" "$(get_release_page)" "${artifact_dir}/*"
+    else
+      GITHUB_TOKEN="${github_token}" github-release -prerelease "bazelbuild/bazel" "${full_release_name}" "${release_branch}" "$(get_release_page)" "${artifact_dir}/*"
     fi
   fi
 }
@@ -199,6 +200,8 @@ function release_to_gcs() {
     fi
     create_index_html "${artifact_dir}" > "${artifact_dir}/index.html"
     gsutil -m cp "${artifact_dir}/**" "gs://bazel/${release_path}"
+    # Set the content type on index.html so it isn't autodetected incorrectly by the browser.
+    gsutil setmeta -h "Content-Type: text/html; charset=utf-8" "gs://bazel/${release_path}/index.html"
   fi
 }
 
@@ -214,7 +217,7 @@ function ensure_gpg_secret_key_imported() {
 
   # Make sure we use stronger digest algorithm。
   # We use reprepro to generate the debian repository,
-  # but there's no way to pass flags to gpg using reprepro, so writting it into
+  # but there's no way to pass flags to gpg using reprepro, so writing it into
   # ~/.gnupg/gpg.conf
   if ! grep "digest-algo sha256" ~/.gnupg/gpg.conf > /dev/null; then
     echo "digest-algo sha256" >> ~/.gnupg/gpg.conf

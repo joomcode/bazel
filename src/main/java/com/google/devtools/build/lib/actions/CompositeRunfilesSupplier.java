@@ -18,11 +18,14 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
+import com.google.devtools.build.lib.analysis.config.BuildConfigurationValue.RunfileSymlinksMode;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import javax.annotation.Nullable;
 
 /** A {@link RunfilesSupplier} implementation for composing multiple instances. */
 public final class CompositeRunfilesSupplier implements RunfilesSupplier {
@@ -62,20 +65,6 @@ public final class CompositeRunfilesSupplier implements RunfilesSupplier {
   }
 
   @Override
-  public boolean equals(Object other) {
-    if (!(other instanceof CompositeRunfilesSupplier)) {
-      return false;
-    }
-    CompositeRunfilesSupplier that = (CompositeRunfilesSupplier) other;
-    return suppliers.equals(that.suppliers);
-  }
-
-  @Override
-  public int hashCode() {
-    return suppliers.hashCode();
-  }
-
-  @Override
   public NestedSet<Artifact> getArtifacts() {
     NestedSetBuilder<Artifact> result = NestedSetBuilder.stableOrder();
     for (RunfilesSupplier supplier : suppliers) {
@@ -106,12 +95,15 @@ public final class CompositeRunfilesSupplier implements RunfilesSupplier {
   }
 
   @Override
-  public ImmutableList<Artifact> getManifests() {
-    ImmutableList.Builder<Artifact> result = ImmutableList.builder();
+  @Nullable
+  public RunfileSymlinksMode getRunfileSymlinksMode(PathFragment runfilesDir) {
     for (RunfilesSupplier supplier : suppliers) {
-      result.addAll(supplier.getManifests());
+      RunfileSymlinksMode mode = supplier.getRunfileSymlinksMode(runfilesDir);
+      if (mode != null) {
+        return mode;
+      }
     }
-    return result.build();
+    return null;
   }
 
   @Override
@@ -125,12 +117,16 @@ public final class CompositeRunfilesSupplier implements RunfilesSupplier {
   }
 
   @Override
-  public boolean isRunfileLinksEnabled(PathFragment runfilesDir) {
+  public RunfilesSupplier withOverriddenRunfilesDir(PathFragment newRunfilesDir) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public Map<Artifact, RunfilesTree> getRunfilesTreesForLogging() {
+    Map<Artifact, RunfilesTree> result = new LinkedHashMap<>();
     for (RunfilesSupplier supplier : suppliers) {
-      if (supplier.isRunfileLinksEnabled(runfilesDir)) {
-        return true;
-      }
+      result.putAll(supplier.getRunfilesTreesForLogging());
     }
-    return false;
+    return result;
   }
 }

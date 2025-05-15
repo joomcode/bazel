@@ -17,47 +17,35 @@ package com.google.devtools.build.lib.packages;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.cmdline.BazelStarlarkContext;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.packages.Attribute.StarlarkComputedDefaultTemplate.CannotPrecomputeDefaultsException;
 import com.google.devtools.build.lib.packages.Package.NameConflictException;
+import com.google.devtools.build.lib.packages.PackageFactory.PackageContext;
+import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
+import com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.util.Map;
 import java.util.Set;
-import net.starlark.java.eval.StarlarkSemantics;
+import net.starlark.java.eval.Dict;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.NoneType;
+import net.starlark.java.eval.Printer;
+import net.starlark.java.eval.Starlark;
 import net.starlark.java.eval.StarlarkThread;
 import net.starlark.java.eval.StarlarkThread.CallStackEntry;
-import net.starlark.java.syntax.Location;
+import net.starlark.java.eval.Tuple;
 
 /**
- * Given a {@link RuleClass} and a set of attribute values, returns a {@link Rule} instance. Also
- * performs a number of checks and associates the {@link Rule} and the owning {@link Package} with
- * each other.
- *
- * <p>This class is immutable, once created the set of managed {@link RuleClass}es will not change.
- *
- * <p>Note: the code that actually populates the RuleClass map has been moved to {@link
- * RuleClassProvider}.
+ * Static utility class for defining Starlark callables for builtin rules (i.e., {@link
+ * RuleFunction} objects for builtin rules' {@link RuleClass} objects), and instantiating those
+ * rules to produce targets (i.e., {@link Rule} objects).
  */
 public class RuleFactory {
 
-  /** Maps rule class name to the metaclass instance for that rule. */
-  private final ImmutableMap<String, RuleClass> ruleClassMap;
-
-  /** Constructs a RuleFactory instance. */
-  public RuleFactory(RuleClassProvider provider) {
-    this.ruleClassMap = ImmutableMap.copyOf(provider.getRuleClassMap());
-  }
-
-  /** Returns the (immutable, unordered) set of names of all the known rule classes. */
-  public Set<String> getRuleClassNames() {
-    return ruleClassMap.keySet();
-  }
-
-  /** Returns the RuleClass for the specified rule class name. */
-  public RuleClass getRuleClass(String ruleClassName) {
-    return ruleClassMap.get(ruleClassName);
-  }
+  private RuleFactory() {} // uninstantiable
 
   /**
    * Creates and returns a rule instance.
@@ -69,8 +57,8 @@ public class RuleFactory {
       Package.Builder pkgBuilder,
       RuleClass ruleClass,
       BuildLangTypedAttributeValuesMap attributeValues,
+      boolean failOnUnknownAttributes,
       EventHandler eventHandler,
-      StarlarkSemantics semantics,
       ImmutableList<StarlarkThread.CallStackEntry> callstack)
       throws InvalidRuleException, InterruptedException {
     Preconditions.checkNotNull(ruleClass);
@@ -99,7 +87,7 @@ public class RuleFactory {
           ruleClass + " cannot be in the WORKSPACE file " + "(used by " + label + ")");
     }
 
-    AttributesAndLocation generator =
+    BuildLangTypedAttributeValuesMap attributes =
         generatorAttributesForMacros(pkgBuilder, attributeValues, callstack);
 
     // The raw stack is of the form [<toplevel>@BUILD:1, macro@lib.bzl:1, cc_library@<builtin>].
@@ -108,12 +96,7 @@ public class RuleFactory {
 
     try {
       return ruleClass.createRule(
-          pkgBuilder,
-          label,
-          generator.attributes,
-          eventHandler,
-          generator.location, // see b/23974287 for rationale
-          callstack);
+          pkgBuilder, label, attributes, failOnUnknownAttributes, eventHandler, callstack);
     } catch (LabelSyntaxException | CannotPrecomputeDefaultsException e) {
       throw new RuleFactory.InvalidRuleException(ruleClass + " " + e.getMessage());
     }
@@ -127,11 +110,10 @@ public class RuleFactory {
    * @param attributeValues a {@link BuildLangTypedAttributeValuesMap} mapping attribute names to
    *     attribute values of build-language type. Each attribute must be defined for this class of
    *     rule, and have a build-language-typed value which can be converted to the appropriate
-   *     native type of the attribute (i.e. via {@link BuildType#selectableConvert}). There must be
-   *     a map entry for each non-optional attribute of this class of rule.
+   *     native type of the attribute (i.e. via {@link BuildType#convertFromBuildLangType}). There
+   *     must be a map entry for each non-optional attribute of this class of rule.
    * @param eventHandler a eventHandler on which errors and warnings are reported during rule
    *     creation
-   * @param semantics the Starlark semantics
    * @param callstack the stack of active calls in the Starlark thread
    * @throws InvalidRuleException if the rule could not be constructed for any reason (e.g. no
    *     {@code name} attribute is defined)
@@ -139,16 +121,23 @@ public class RuleFactory {
    *     package
    * @throws InterruptedException if interrupted
    */
+  @CanIgnoreReturnValue
   public static Rule createAndAddRule(
       Package.Builder pkgBuilder,
       RuleClass ruleClass,
       BuildLangTypedAttributeValuesMap attributeValues,
+      boolean failOnUnknownAttributes,
       EventHandler eventHandler,
-      StarlarkSemantics semantics,
       ImmutableList<StarlarkThread.CallStackEntry> callstack)
       throws InvalidRuleException, NameConflictException, InterruptedException {
     Rule rule =
-        createRule(pkgBuilder, ruleClass, attributeValues, eventHandler, semantics, callstack);
+        createRule(
+            pkgBuilder,
+            ruleClass,
+            attributeValues,
+            failOnUnknownAttributes,
+            eventHandler,
+            callstack);
     pkgBuilder.addRule(rule);
     return rule;
   }
@@ -163,17 +152,6 @@ public class RuleFactory {
     }
   }
 
-  /** A pair of attributes and location. */
-  private static final class AttributesAndLocation {
-    final BuildLangTypedAttributeValuesMap attributes;
-    final Location location;
-
-    AttributesAndLocation(BuildLangTypedAttributeValuesMap attributes, Location location) {
-      this.attributes = attributes;
-      this.location = location;
-    }
-  }
-
   /**
    * A wrapper around an map of named attribute values that specifies whether the map's values are
    * of "build-language" or of "native" types.
@@ -182,7 +160,8 @@ public class RuleFactory {
     /**
      * Returns {@code true} if all the map's values are "build-language typed", i.e., resulting from
      * the evaluation of an expression in the build language. Returns {@code false} if all the map's
-     * values are "natively typed", i.e. of a type returned by {@link BuildType#selectableConvert}.
+     * values are "natively typed", i.e. of a type returned by {@link
+     * BuildType#convertFromBuildLangType}.
      */
     boolean valuesAreBuildLanguageTyped();
 
@@ -218,7 +197,7 @@ public class RuleFactory {
     }
 
     @Override
-    public Iterable<Map.Entry<String, Object>> getAttributeAccessors() {
+    public Set<Map.Entry<String, Object>> getAttributeAccessors() {
       return attributeValues.entrySet();
     }
 
@@ -239,57 +218,120 @@ public class RuleFactory {
   }
 
   /**
-   * If the rule was created by a macro, this method sets the appropriate values for the attributes
-   * generator_{name, function, location} and returns all attributes.
+   * If the rule was created by a macro, sets the appropriate value for the generator_name attribute
+   * and returns all attributes.
    *
    * <p>Otherwise, it returns the given attributes without any changes.
    */
-  private static AttributesAndLocation generatorAttributesForMacros(
+  private static BuildLangTypedAttributeValuesMap generatorAttributesForMacros(
       Package.Builder pkgBuilder,
       BuildLangTypedAttributeValuesMap args,
       ImmutableList<CallStackEntry> stack) {
-    // For a callstack [BUILD <toplevel>, .bzl <function>, <rule>],
-    // location is that of the caller of 'rule' (the .bzl function).
-    Location location = stack.size() < 2 ? Location.BUILTIN : stack.get(stack.size() - 2).location;
-
-    boolean hasName = args.containsAttributeNamed("generator_name");
-    boolean hasFunc = args.containsAttributeNamed("generator_function");
-    // TODO(bazel-team): resolve cases in our code where hasName && !hasFunc, or hasFunc && !hasName
-    if (hasName || hasFunc) {
-      return new AttributesAndLocation(args, location);
-    }
-
-    // The "generator" of a rule is the function (sometimes called "macro")
-    // outermost in the call stack.
-    // The stack must contain at least two entries:
+    // The "generator" of a rule is the function (sometimes called "macro") outermost in the call
+    // stack. For rules with generators, the stack must contain at least two entries:
     // 0: the outermost function (e.g. a BUILD file),
     // 1: the function called by it (e.g. a "macro" in a .bzl file).
-    // optionally followed by other Starlark or built-in functions,
-    // and finally the rule instantiation function.
+    // optionally followed by other Starlark or built-in functions, and finally the rule
+    // instantiation function.
     if (stack.size() < 2 || !stack.get(1).location.file().endsWith(".bzl")) {
-      return new AttributesAndLocation(args, location); // macro is not a Starlark function
+      // Not instantiated by a Starlark macro.
+      // (Edge case not handled: BUILD file calls helper(cc_library) defined in an .scl file, and
+      // helper instantiates the rule that's passed as an argument.)
+      return args;
     }
-    Location generatorLocation = stack.get(0).location; // location of call to generator
-    ImmutableMap.Builder<String, Object> builder = ImmutableMap.builder();
-    for (Map.Entry<String, Object> attributeAccessor : args.getAttributeAccessors()) {
-      String attributeName = args.getName(attributeAccessor);
-      builder.put(attributeName, args.getValue(attributeAccessor));
+
+    if (args.containsAttributeNamed("generator_name")) {
+      // generator_name is explicitly set. Return early to avoid a map key conflict.
+      // TODO(b/274802222): Should this be prohibited?
+      return args;
     }
-    String generatorName = pkgBuilder.getGeneratorNameByLocation(generatorLocation);
+
+    ImmutableMap.Builder<String, Object> builder =
+        ImmutableMap.builderWithExpectedSize(args.attributeValues.size() + 1);
+    builder.putAll(args.attributeValues);
+
+    String generatorName = pkgBuilder.getGeneratorNameByLocation(stack.get(0).location);
     if (generatorName == null) {
       generatorName = (String) args.getAttributeValue("name");
     }
     builder.put("generator_name", generatorName);
 
-    try {
-      args = new BuildLangTypedAttributeValuesMap(builder.buildOrThrow());
-    } catch (IllegalArgumentException unused) {
-      // We just fall back to the default case and swallow any messages.
+    return new BuildLangTypedAttributeValuesMap(builder.buildOrThrow());
+  }
+
+  /**
+   * Builds a map from rule names to (newly constructed)) Starlark callables that instantiate them.
+   */
+  public static ImmutableMap<String, BuiltinRuleFunction> buildRuleFunctions(
+      Map<String, RuleClass> ruleClassMap) {
+    ImmutableMap.Builder<String, BuiltinRuleFunction> result = ImmutableMap.builder();
+    for (String ruleClassName : ruleClassMap.keySet()) {
+      RuleClass cl = ruleClassMap.get(ruleClassName);
+      if (cl.getRuleClassType() == RuleClassType.NORMAL
+          || cl.getRuleClassType() == RuleClassType.TEST) {
+        result.put(ruleClassName, new BuiltinRuleFunction(cl));
+      }
+    }
+    return result.buildOrThrow();
+  }
+
+  /** A callable Starlark value that creates Rules for native RuleClasses. */
+  // TODO(adonovan): why is this distinct from RuleClass itself?
+  // Make RuleClass implement StarlarkCallable directly.
+  private static class BuiltinRuleFunction implements RuleFunction {
+    private final RuleClass ruleClass;
+
+    BuiltinRuleFunction(RuleClass ruleClass) {
+      this.ruleClass = Preconditions.checkNotNull(ruleClass);
     }
 
-    // TODO(adonovan): is it appropriate to use generatorLocation as the rule's main location?
-    // Or would 'location' (the immediate call) be more informative? When there are errors, the
-    // location of the toplevel call of the generator may be quite unrelated to the error message.
-    return new AttributesAndLocation(args, generatorLocation);
+    @Override
+    public NoneType call(StarlarkThread thread, Tuple args, Dict<String, Object> kwargs)
+        throws EvalException, InterruptedException {
+      if (!args.isEmpty()) {
+        throw Starlark.errorf("unexpected positional arguments");
+      }
+      BazelStarlarkContext.checkLoadingOrWorkspacePhase(thread, ruleClass.getName());
+      try {
+        PackageContext context = PackageFactory.getContext(thread);
+        RuleFactory.createAndAddRule(
+            context.pkgBuilder,
+            ruleClass,
+            new BuildLangTypedAttributeValuesMap(kwargs),
+            thread
+                .getSemantics()
+                .getBool(BuildLanguageOptions.INCOMPATIBLE_FAIL_ON_UNKNOWN_ATTRIBUTES),
+            context.eventHandler,
+            thread.getCallStack());
+      } catch (RuleFactory.InvalidRuleException | Package.NameConflictException e) {
+        throw new EvalException(e);
+      }
+      return Starlark.NONE;
+    }
+
+    @Override
+    public RuleClass getRuleClass() {
+      return ruleClass;
+    }
+
+    @Override
+    public String getName() {
+      return ruleClass.getName();
+    }
+
+    @Override
+    public void repr(Printer printer) {
+      printer.append("<built-in rule " + getName() + ">");
+    }
+
+    @Override
+    public String toString() {
+      return getName() + "(...)";
+    }
+
+    @Override
+    public boolean isImmutable() {
+      return true;
+    }
   }
 }

@@ -267,7 +267,8 @@ EOF
   # Set javabase to an absolute path.
   bazel build //$pkg/java/hello:hello //$pkg/java/hello:hello_deploy.jar \
       "$stamp_arg" \
-      --extra_toolchains="//$pkg/jvm:all,//tools/jdk:all" \
+      --extra_toolchains="//tools/jdk:all" \
+      --extra_toolchains="//$pkg/jvm:all" \
       --platforms="//$pkg/jvm:platform" \
       "$embed_label" >&"$TEST_log" \
       || fail "Build failed"
@@ -372,7 +373,7 @@ function test_compiles_hello_library_from_deploy_jar() {
   mkdir "$pkg" || fail "mkdir $pkg"
   write_hello_library_files "$pkg"
 
-  bazel build //$pkg/java/main:main_deploy.jar || fail "build failed"
+  bazel build //$pkg/java/main:{main,main_deploy.jar} || fail "build failed"
   ${PRODUCT_NAME}-bin/$pkg/java/main/main --singlejar \
       | grep -q "Hello, Library!;Hello, World!" || fail "comparison failed"
 
@@ -418,7 +419,7 @@ function test_does_not_create_executable_when_not_asked_for() {
 
 }
 
-# Assert that the a deploy jar can be a dependency of another java_binary.
+# Assert that a deploy jar can be a dependency of another java_binary.
 function test_building_deploy_jar_dependent_on_deploy_jar() {
  local -r pkg="${FUNCNAME[0]}"
   mkdir -p $pkg/java/deploy || fail "mkdir"
@@ -590,6 +591,10 @@ import javax.lang.model.*;
 import javax.lang.model.element.*;
 @SupportedAnnotationTypes(value= {"test.processor.TestAnnotation"})
 public class Processor extends AbstractProcessor {
+  @Override
+  public SourceVersion getSupportedSourceVersion() {
+    return SourceVersion.latestSupported();
+  }
   private static final String OUTFILE_CONTENT = "package test;\n"
       + "public class Generated {\n"
       + "  public static String value = \"" + ProcessorDep.value + "\";\n"
@@ -841,12 +846,11 @@ java_binary(
     main_class = 'hello.Hello'
 )
 EOF
-  bazel build //$pkg/java/hello:hello //$pkg/java/hello:hello_deploy.jar >& "$TEST_log" \
+  bazel build --incompatible_disallow_java_import_empty_jars=0 //$pkg/java/hello:hello //$pkg/java/hello:hello_deploy.jar >& "$TEST_log" \
       || fail "Expected success"
-  bazel run //$pkg/java/hello:hello -- --singlejar >& "$TEST_log"
+  bazel run --incompatible_disallow_java_import_empty_jars=0 //$pkg/java/hello:hello -- --singlejar >& "$TEST_log"
   expect_log "Hello World!"
 }
-
 
 function test_arg_compile_action() {
   local package="${FUNCNAME[0]}"
@@ -854,9 +858,10 @@ function test_arg_compile_action() {
 
   cat > "${package}/lib.bzl" <<EOF
 def _actions_test_impl(target, ctx):
-    action = target.actions[0] # digest action
-    if action.mnemonic != "Javac":
-      fail("Expected the first action to be Javac.")
+    javac_actions = [a for a in target.actions if a.mnemonic == "Javac"]
+    if len(javac_actions) != 1:
+      fail("Expected exactly one Javac action, but found", len(javac_actions))
+    action = javac_actions[0]
     aspect_out = ctx.actions.declare_file('aspect_out')
     ctx.actions.run_shell(inputs = action.inputs,
                           outputs = [aspect_out],

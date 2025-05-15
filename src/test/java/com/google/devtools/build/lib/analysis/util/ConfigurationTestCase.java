@@ -22,20 +22,19 @@ import com.google.devtools.build.lib.actions.ActionKeyContext;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.ServerDirectories;
-import com.google.devtools.build.lib.analysis.config.BuildConfigurationCollection;
 import com.google.devtools.build.lib.analysis.config.BuildConfigurationValue;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.FragmentFactory;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.clock.BlazeClock;
-import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions;
 import com.google.devtools.build.lib.packages.util.MockToolsConfig;
 import com.google.devtools.build.lib.pkgcache.PackageOptions;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.rules.repository.RepositoryDelegatorFunction;
+import com.google.devtools.build.lib.runtime.QuiescingExecutorsImpl;
 import com.google.devtools.build.lib.skyframe.BazelSkyframeExecutorConstants;
 import com.google.devtools.build.lib.skyframe.BuildInfoCollectionFunction;
 import com.google.devtools.build.lib.skyframe.PrecomputedValue;
@@ -94,6 +93,7 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
     analysisMock = AnalysisMock.get();
 
     ConfiguredRuleClassProvider ruleClassProvider = analysisMock.createRuleClassProvider();
+    buildOptionClasses = ruleClassProvider.getFragmentRegistry().getOptionsClasses();
     PathPackageLocator pkgLocator =
         new PathPackageLocator(
             outputBase,
@@ -125,37 +125,46 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
             .setActionKeyContext(actionKeyContext)
             .setWorkspaceStatusActionFactory(workspaceStatusActionFactory)
             .setExtraSkyFunctions(analysisMock.getSkyFunctions(directories))
-            .setPerCommandSyscallCache(SyscallCache.NO_CACHE)
+            .setSyscallCache(SyscallCache.NO_CACHE)
             .build();
     SkyframeExecutorTestHelper.process(skyframeExecutor);
     skyframeExecutor.injectExtraPrecomputedValues(
         ImmutableList.of(
             PrecomputedValue.injected(
+                PrecomputedValue.BASELINE_CONFIGURATION,
+                BuildOptions.getDefaultBuildOptionsForFragments(buildOptionClasses)),
+            PrecomputedValue.injected(
                 RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE, Optional.empty()),
             PrecomputedValue.injected(
                 RepositoryDelegatorFunction.REPOSITORY_OVERRIDES, ImmutableMap.of()),
             PrecomputedValue.injected(
-                RepositoryDelegatorFunction.DEPENDENCY_FOR_UNCONDITIONAL_FETCHING,
-                RepositoryDelegatorFunction.DONT_FETCH_UNCONDITIONALLY),
+                RepositoryDelegatorFunction.FORCE_FETCH,
+                RepositoryDelegatorFunction.FORCE_FETCH_DISABLED),
             PrecomputedValue.injected(
+                RepositoryDelegatorFunction.VENDOR_DIRECTORY, Optional.empty()),
+			PrecomputedValue.injected(
                 BuildInfoCollectionFunction.BUILD_INFO_FACTORIES,
                 ruleClassProvider.getBuildInfoFactoriesAsMap())));
     PackageOptions packageOptions = Options.getDefaults(PackageOptions.class);
     packageOptions.showLoadingProgress = true;
     packageOptions.globbingThreads = 7;
+    BuildLanguageOptions options = Options.getDefaults(BuildLanguageOptions.class);
+    // TODO: enable Bzlmod for this test case
+    // https://github.com/bazelbuild/bazel/issues/19824
+    options.enableBzlmod = false;
     skyframeExecutor.preparePackageLoading(
         pkgLocator,
         packageOptions,
-        Options.getDefaults(BuildLanguageOptions.class),
+        options,
         UUID.randomUUID(),
         ImmutableMap.of(),
+        QuiescingExecutorsImpl.forTesting(),
         new TimestampGranularityMonitor(BlazeClock.instance()));
     skyframeExecutor.setActionEnv(ImmutableMap.of());
 
     mockToolsConfig = new MockToolsConfig(rootDirectory);
     analysisMock.setupMockClient(mockToolsConfig);
     analysisMock.setupMockWorkspaceFiles(directories.getEmbeddedBinariesRoot());
-    buildOptionClasses = ruleClassProvider.getFragmentRegistry().getOptionsClasses();
     fragmentFactory = new FragmentFactory();
   }
 
@@ -166,22 +175,23 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
   }
 
   /**
-   * Returns a {@link BuildConfigurationCollection} with the given non-default options.
+   * Returns a {@link BuildConfigurationValue} with the given non-default options.
    *
    * @param args native option name/pair descriptions in command line form (e.g. "--cpu=k8")
    */
-  protected BuildConfigurationCollection createCollection(String... args) throws Exception {
-    return createCollection(ImmutableMap.of(), args);
+  protected BuildConfigurationValue createConfiguration(String... args) throws Exception {
+    return createConfiguration(ImmutableMap.of(), args);
   }
 
   /**
-   * Variation of {@link #createCollection(String...)} that also supports Starlark-defined options.
+   * Variation of {@link #createConfiguration(String...)} that also supports Starlark-defined
+   * options.
    *
    * @param starlarkOptions map of Starlark-defined options where the keys are option names (in the
    *     form of label-like strings) and the values are option values
    * @param args native option name/pair descriptions in command line form (e.g. "--cpu=k8")
    */
-  protected BuildConfigurationCollection createCollection(
+  protected BuildConfigurationValue createConfiguration(
       ImmutableMap<String, Object> starlarkOptions, String... args) throws Exception {
 
     BuildOptions targetOptions = parseBuildOptions(starlarkOptions, args);
@@ -224,15 +234,15 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
   /** Returns a raw {@link BuildConfigurationValue} with the given parameters. */
   protected BuildConfigurationValue createRaw(
       BuildOptions buildOptions,
-      String repositoryName,
-      boolean siblingRepositoryLayout,
-      String transitionDirectoryNameFragment)
+      String mnemonic,
+      String workspaceName,
+      boolean siblingRepositoryLayout)
       throws Exception {
-    return BuildConfigurationValue.create(
+    return BuildConfigurationValue.createForTesting(
         buildOptions,
-        RepositoryName.create(repositoryName),
+        mnemonic,
+        workspaceName,
         siblingRepositoryLayout,
-        transitionDirectoryNameFragment,
         skyframeExecutor.getBlazeDirectoriesForTesting(),
         skyframeExecutor.getRuleClassProviderForTesting(),
         fragmentFactory);
@@ -244,7 +254,7 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
    * @param args native option name/pair descriptions in command line form (e.g. "--cpu=k8")
    */
   protected BuildConfigurationValue create(String... args) throws Exception {
-    return createCollection(args).getTargetConfiguration();
+    return createConfiguration(args);
   }
 
   /**
@@ -256,16 +266,19 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
    */
   protected BuildConfigurationValue create(
       ImmutableMap<String, Object> starlarkOptions, String... args) throws Exception {
-    return createCollection(starlarkOptions, args).getTargetConfiguration();
+    return createConfiguration(starlarkOptions, args);
   }
 
   /**
-   * Returns a host {@link BuildConfigurationValue} derived from a target configuration with the
+   * Returns an exec {@link BuildConfigurationValue} derived from a target configuration with the
    * given non-default options.
    *
    * @param args native option name/pair descriptions in command line form (e.g. "--cpu=k8")
    */
-  protected BuildConfigurationValue createHost(String... args) throws Exception {
-    return createCollection(args).getHostConfiguration();
+  protected BuildConfigurationValue createExec(String... args) throws Exception {
+    return skyframeExecutor.getConfiguration(
+        reporter,
+        AnalysisTestUtil.execOptions(parseBuildOptions(args), reporter),
+        /* keepGoing= */ false);
   }
 }

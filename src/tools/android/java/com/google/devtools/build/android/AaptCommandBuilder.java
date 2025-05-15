@@ -13,7 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.android;
 
-import com.android.builder.core.VariantType;
+import com.android.builder.core.VariantTypeImpl;
 import com.android.repository.Revision;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
@@ -36,7 +36,7 @@ public class AaptCommandBuilder {
 
   private final ImmutableList.Builder<String> flags = new ImmutableList.Builder<>();
   private Revision buildToolsVersion;
-  private VariantType variantType;
+  private VariantTypeImpl variantType;
 
   public AaptCommandBuilder(Path aapt) {
     flags.add(aapt.toString());
@@ -53,7 +53,7 @@ public class AaptCommandBuilder {
 
   /** Sets the variant type to be used for {@link #whenVariantIs}. */
   @CanIgnoreReturnValue
-  public AaptCommandBuilder forVariantType(VariantType variantType) {
+  public AaptCommandBuilder forVariantType(VariantTypeImpl variantType) {
     Preconditions.checkNotNull(variantType);
     Preconditions.checkState(this.variantType == null, "A variant type was already specified.");
     this.variantType = variantType;
@@ -159,7 +159,7 @@ public class AaptCommandBuilder {
   }
 
   /** Adds the next flag to the builder only if the variant type is the passed-in type. */
-  public ConditionalAaptCommandBuilder whenVariantIs(VariantType variantType) {
+  public ConditionalAaptCommandBuilder whenVariantIs(VariantTypeImpl variantType) {
     Preconditions.checkNotNull(variantType);
     return when(this.variantType == variantType);
   }
@@ -204,14 +204,6 @@ public class AaptCommandBuilder {
     AaptCommandBuilder thenAdd(String flag, @Nullable Path value);
 
     /**
-     * Adds a single flag and associated path value to the builder if the value is non-null and the
-     * condition was true.
-     *
-     * @see AaptCommandBuilder#add(String,Optional)
-     */
-    AaptCommandBuilder thenAdd(String flag, Optional<Path> value);
-
-    /**
      * Adds the values in the collection to the builder, each preceded by the given flag, if the
      * collection was non-empty and the condition was true.
      *
@@ -246,11 +238,6 @@ public class AaptCommandBuilder {
     }
 
     @Override
-    public AaptCommandBuilder thenAdd(String flag, @Nullable Optional<Path> value) {
-      return originalCommandBuilder.add(flag, value);
-    }
-
-    @Override
     public AaptCommandBuilder thenAddRepeated(String flag, Collection<String> values) {
       return originalCommandBuilder.addRepeated(flag, values);
     }
@@ -279,13 +266,6 @@ public class AaptCommandBuilder {
     @Override
     public AaptCommandBuilder thenAdd(String flag, @Nullable Path value) {
       Preconditions.checkNotNull(flag);
-      return originalCommandBuilder;
-    }
-
-    @Override
-    public AaptCommandBuilder thenAdd(String flag, Optional<Path> value) {
-      Preconditions.checkNotNull(flag);
-      Preconditions.checkNotNull(value);
       return originalCommandBuilder;
     }
 

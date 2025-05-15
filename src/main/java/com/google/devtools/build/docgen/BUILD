@@ -2,7 +2,10 @@ load("@rules_java//java:defs.bzl", "java_binary", "java_library")
 
 # Description:
 #   Documentation generator for Bazel
-package(default_visibility = ["//src:__subpackages__"])
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//src:__subpackages__"],
+)
 
 filegroup(
     name = "srcs",
@@ -31,14 +34,19 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/util:classpath",
         "//src/main/java/com/google/devtools/build/lib/util:filetype",
         "//src/main/java/com/google/devtools/build/skydoc/fakebuildapi",
+        "//src/main/java/com/google/devtools/build/skydoc/rendering:rendering_util",
+        "//src/main/java/com/google/devtools/build/skydoc/rendering/proto:stardoc_output_java_proto",
         "//src/main/java/com/google/devtools/common/options",
         "//src/main/java/net/starlark/java/annot",
         "//src/main/java/net/starlark/java/eval",
         "//src/main/protobuf:builtin_java_proto",
         "//third_party:apache_velocity",
+        "//third_party:auto_value",
+        "//third_party:flogger",
         "//third_party:gson",
         "//third_party:guava",
         "//third_party:jsr305",
+        "//third_party/protobuf:protobuf_java",
     ],
 )
 

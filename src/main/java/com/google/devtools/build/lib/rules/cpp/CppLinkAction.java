@@ -22,9 +22,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
-import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.actions.AbstractAction;
-import com.google.devtools.build.lib.actions.ActionContinuationOrResult;
 import com.google.devtools.build.lib.actions.ActionEnvironment;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionExecutionException;
@@ -33,16 +32,18 @@ import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.ActionResult;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
+import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
 import com.google.devtools.build.lib.actions.CommandAction;
-import com.google.devtools.build.lib.actions.CommandLine;
 import com.google.devtools.build.lib.actions.CommandLineExpansionException;
 import com.google.devtools.build.lib.actions.CommandLines.CommandLineAndParamFileInfo;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.ExecutionRequirements;
+import com.google.devtools.build.lib.actions.FileArtifactValue;
 import com.google.devtools.build.lib.actions.ResourceSet;
 import com.google.devtools.build.lib.actions.SimpleSpawn;
+import com.google.devtools.build.lib.actions.SimpleSpawn.LocalResourcesSupplier;
 import com.google.devtools.build.lib.actions.Spawn;
-import com.google.devtools.build.lib.actions.SpawnContinuation;
+import com.google.devtools.build.lib.actions.SpawnResult;
 import com.google.devtools.build.lib.actions.extra.CppLinkInfo;
 import com.google.devtools.build.lib.actions.extra.ExtraActionInfo;
 import com.google.devtools.build.lib.analysis.actions.ActionConstructionContext;
@@ -63,6 +64,7 @@ import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.util.ShellEscaper;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -75,6 +77,8 @@ import net.starlark.java.eval.StarlarkList;
 @ThreadCompatible
 public final class CppLinkAction extends AbstractAction implements CommandAction {
 
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
+
   /**
    * An abstraction for creating intermediate and output artifacts for C++ linking.
    *
@@ -86,6 +90,13 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
   public interface LinkArtifactFactory {
     /** Create an artifact at the specified root-relative path in the bin directory. */
     Artifact create(
+        ActionConstructionContext actionConstructionContext,
+        RepositoryName repositoryName,
+        BuildConfigurationValue configuration,
+        PathFragment rootRelativePath);
+
+    /** Create a tree artifact at the specified root-relative path in the bin directory. */
+    SpecialArtifact createTreeArtifact(
         ActionConstructionContext actionConstructionContext,
         RepositoryName repositoryName,
         BuildConfigurationValue configuration,
@@ -107,6 +118,49 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
           return actionConstructionContext.getDerivedArtifact(
               rootRelativePath, configuration.getBinDirectory(repositoryName));
         }
+
+        @Override
+        public SpecialArtifact createTreeArtifact(
+            ActionConstructionContext actionConstructionContext,
+            RepositoryName repositoryName,
+            BuildConfigurationValue configuration,
+            PathFragment rootRelativePath) {
+          return actionConstructionContext.getTreeArtifact(
+              rootRelativePath, configuration.getBinDirectory(repositoryName));
+        }
+      };
+
+  /**
+   * An implementation of {@link LinkArtifactFactory} that can create artifacts anywhere.
+   *
+   * <p>Necessary when the LTO backend actions of libraries should be shareable, and thus cannot be
+   * under the package directory.
+   *
+   * <p>Necessary because the actions of nativedeps libraries should be shareable, and thus cannot
+   * be under the package directory.
+   */
+  public static final LinkArtifactFactory SHAREABLE_LINK_ARTIFACT_FACTORY =
+      new LinkArtifactFactory() {
+        @Override
+        public Artifact create(
+            ActionConstructionContext actionConstructionContext,
+            RepositoryName repositoryName,
+            BuildConfigurationValue configuration,
+            PathFragment rootRelativePath) {
+          return actionConstructionContext.getShareableArtifact(
+              rootRelativePath, configuration.getBinDirectory(repositoryName));
+        }
+
+        @Override
+        public SpecialArtifact createTreeArtifact(
+            ActionConstructionContext actionConstructionContext,
+            RepositoryName repositoryName,
+            BuildConfigurationValue configuration,
+            PathFragment rootRelativePath) {
+          return actionConstructionContext
+              .getAnalysisEnvironment()
+              .getTreeArtifact(rootRelativePath, configuration.getBinDirectory(repositoryName));
+        }
       };
 
   private static final String LINK_GUID = "58ec78bd-1176-4e36-8143-439f656b181d";
@@ -120,6 +174,7 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
   private final ImmutableMap<Linkstamp, Artifact> linkstamps;
 
   private final LinkCommandLine linkCommandLine;
+  private final ActionEnvironment env;
 
   private final boolean isLtoIndexing;
 
@@ -150,7 +205,7 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
       ImmutableMap<String, String> executionRequirements,
       PathFragment ldExecutable,
       String targetCpu) {
-    super(owner, inputs, outputs, env);
+    super(owner, inputs, outputs);
     this.mnemonic = getMnemonic(mnemonic, isLtoIndexing);
     this.outputLibrary = outputLibrary;
     this.linkOutput = linkOutput;
@@ -158,6 +213,7 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
     this.isLtoIndexing = isLtoIndexing;
     this.linkstamps = linkstamps;
     this.linkCommandLine = linkCommandLine;
+    this.env = env;
     this.toolchainEnv = toolchainEnv;
     this.executionRequirements = executionRequirements;
     this.ldExecutable = ldExecutable;
@@ -176,6 +232,11 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
   }
 
   @Override
+  public ActionEnvironment getEnvironment() {
+    return env;
+  }
+
+  @Override
   @VisibleForTesting
   public ImmutableMap<String, String> getIncompleteEnvironmentForTesting() {
     return getEffectiveEnvironment(ImmutableMap.of());
@@ -183,7 +244,8 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
 
   @Override
   public ImmutableMap<String, String> getEffectiveEnvironment(Map<String, String> clientEnv) {
-    LinkedHashMap<String, String> result = Maps.newLinkedHashMapWithExpectedSize(env.size());
+    LinkedHashMap<String, String> result =
+        Maps.newLinkedHashMapWithExpectedSize(env.estimatedSize());
     env.resolve(result, clientEnv);
 
     result.putAll(toolchainEnv);
@@ -196,14 +258,8 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
     return ImmutableMap.copyOf(result);
   }
 
-  /**
-   * Returns the link configuration; for correctness you should not call this method during
-   * execution - only the argv is part of the action cache key, and we therefore don't guarantee
-   * that the action will be re-executed if the contents change in a way that does not affect the
-   * argv.
-   */
   @VisibleForTesting
-  public LinkCommandLine getLinkCommandLine() {
+  public LinkCommandLine getLinkCommandLineForTesting() {
     return linkCommandLine;
   }
 
@@ -211,11 +267,11 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
    * Returns the output of this action as a {@link LibraryToLink} or null if it is an executable.
    */
   @Nullable
-  public LibraryToLink getOutputLibrary() {
+  LibraryToLink getOutputLibrary() {
     return outputLibrary;
   }
 
-  public LibraryToLink getInterfaceOutputLibrary() {
+  LibraryToLink getInterfaceOutputLibrary() {
     return interfaceOutputLibrary;
   }
 
@@ -225,16 +281,13 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
   }
 
   @Override
-  public Sequence<CommandLineArgsApi> getStarlarkArgs() throws EvalException {
+  public Sequence<CommandLineArgsApi> getStarlarkArgs() {
     ImmutableSet<Artifact> directoryInputs =
         getInputs().toList().stream()
-            .filter(artifact -> artifact.isDirectory())
+            .filter(Artifact::isDirectory)
             .collect(ImmutableSet.toImmutableSet());
-
-    CommandLine commandLine = linkCommandLine.getCommandLineForStarlark();
-
     CommandLineAndParamFileInfo commandLineAndParamFileInfo =
-        new CommandLineAndParamFileInfo(commandLine, /* paramFileInfo= */ null);
+        new CommandLineAndParamFileInfo(linkCommandLine, /* paramFileInfo= */ null);
 
     Args args = Args.forRegisteredAction(commandLineAndParamFileInfo, directoryInputs);
 
@@ -253,7 +306,7 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
    * @param expander ArtifactExpander for expanding TreeArtifacts.
    * @return a finalized command line suitable for execution
    */
-  public final List<String> getCommandLine(@Nullable ArtifactExpander expander)
+  public List<String> getCommandLine(@Nullable ArtifactExpander expander)
       throws CommandLineExpansionException {
     return linkCommandLine.getCommandLine(expander);
   }
@@ -264,42 +317,59 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
    * <p>This is used to embed various values from the build system into binaries to identify their
    * provenance.
    */
-  public ImmutableList<Artifact> getLinkstampObjects() {
+  ImmutableList<Artifact> getLinkstampObjects() {
     return linkstamps.keySet().stream()
         .map(CcLinkingContext.Linkstamp::getArtifact)
         .collect(ImmutableList.toImmutableList());
   }
 
-  public ImmutableCollection<Artifact> getLinkstampObjectFileInputs() {
+  ImmutableCollection<Artifact> getLinkstampObjectFileInputs() {
     return linkstamps.values();
   }
 
   @Override
-  @ThreadCompatible
-  public ActionContinuationOrResult beginExecution(ActionExecutionContext actionExecutionContext)
+  public ActionResult execute(ActionExecutionContext actionExecutionContext)
       throws ActionExecutionException, InterruptedException {
-    Spawn spawn = createSpawn(actionExecutionContext);
-    SpawnContinuation spawnContinuation =
-        actionExecutionContext
-            .getContext(SpawnStrategyResolver.class)
-            .beginExecution(spawn, actionExecutionContext);
-    return new CppLinkActionContinuation(actionExecutionContext, spawnContinuation);
+    LocalResourcesEstimator localResourcesEstimator =
+        new LocalResourcesEstimator(
+            actionExecutionContext, OS.getCurrent(), linkCommandLine.getLinkerInputArtifacts());
+
+    Spawn spawn = createSpawn(actionExecutionContext, localResourcesEstimator);
+    try {
+      ImmutableList<SpawnResult> spawnResults =
+          actionExecutionContext
+              .getContext(SpawnStrategyResolver.class)
+              .exec(spawn, actionExecutionContext);
+
+      // As per the documentation of SpawnStrategy.exec(), the first entry is always the result of
+      // the successful execution
+      SpawnResult result = spawnResults.get(0);
+      Long consumedMemoryInKb = result.getMemoryInKb();
+      if (consumedMemoryInKb != null) {
+        localResourcesEstimator.logMetrics(consumedMemoryInKb);
+      }
+
+      return ActionResult.create(spawnResults);
+    } catch (ExecException e) {
+      throw ActionExecutionException.fromExecException(e, CppLinkAction.this);
+    }
   }
 
-  private Spawn createSpawn(ActionExecutionContext actionExecutionContext)
+  private Spawn createSpawn(
+      ActionExecutionContext actionExecutionContext,
+      LocalResourcesEstimator localResourcesEstimator)
       throws ActionExecutionException {
     try {
+      ArtifactExpander actionContextExpander = actionExecutionContext.getArtifactExpander();
+      ArtifactExpander expander = actionContextExpander;
       return new SimpleSpawn(
           this,
-          ImmutableList.copyOf(getCommandLine(actionExecutionContext.getArtifactExpander())),
+          ImmutableList.copyOf(getCommandLine(expander)),
           getEffectiveEnvironment(actionExecutionContext.getClientEnv()),
           getExecutionInfo(),
           getInputs(),
           getOutputs(),
-          () ->
-              estimateResourceConsumptionLocal(
-                  OS.getCurrent(),
-                  getLinkCommandLine().getLinkerInputArtifacts().memoizedFlattenAndGetSize()));
+          localResourcesEstimator);
     } catch (CommandLineExpansionException e) {
       String message =
           String.format(
@@ -316,17 +386,16 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
     // The uses of getLinkConfiguration in this method may not be consistent with the computed key.
     // I.e., this may be incrementally incorrect.
     CppLinkInfo.Builder info = CppLinkInfo.newBuilder();
-    info.addAllInputFile(
-        Artifact.toExecPaths(getLinkCommandLine().getLinkerInputArtifacts().toList()));
+    info.addAllInputFile(Artifact.toExecPaths(linkCommandLine.getLinkerInputArtifacts().toList()));
     info.setOutputFile(getPrimaryOutput().getExecPathString());
     if (interfaceOutputLibrary != null) {
       info.setInterfaceOutputFile(interfaceOutputLibrary.getArtifact().getExecPathString());
     }
-    info.setLinkTargetType(getLinkCommandLine().getLinkTargetType().name());
-    info.setLinkStaticness(getLinkCommandLine().getLinkingMode().name());
+    info.setLinkTargetType(linkCommandLine.getLinkTargetType().name());
+    info.setLinkStaticness(linkCommandLine.getLinkingMode().name());
     info.addAllLinkStamp(Artifact.toExecPaths(getLinkstampObjects()));
     info.addAllBuildInfoHeaderArtifact(Artifact.toExecPaths(getBuildInfoHeaderArtifacts()));
-    info.addAllLinkOpt(getLinkCommandLine().getRawLinkArgv(null));
+    info.addAllLinkOpt(linkCommandLine.arguments());
 
     try {
       return super.getExtraActionInfo(actionKeyContext)
@@ -337,7 +406,7 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
   }
 
   /** Returns the (ordered, immutable) list of header files that contain build info. */
-  public Iterable<Artifact> getBuildInfoHeaderArtifacts() {
+  public ImmutableList<Artifact> getBuildInfoHeaderArtifacts() {
     return linkCommandLine.getBuildInfoHeaderArtifacts();
   }
 
@@ -411,50 +480,117 @@ public final class CppLinkAction extends AbstractAction implements CommandAction
   }
 
   /**
-   * Estimates resource consumption when this action is executed locally. During investigation we
-   * found linear dependency between used memory by action and number of inputs. For memory
-   * estimation we are using form C + K * inputs, where C and K selected in such way, that more than
-   * 95% of actions used less than C + K * inputs MB of memory during execution.
+   * Estimates resource consumption when this action is executed locally.
+   *
+   * <p>Because resource estimation for linking can be very costly (we need to inspect the size of
+   * the inputs, which means we have to expand a nested set and stat its files), we memoize those
+   * metrics. We do this to enable logging details about these computations after the linker has
+   * run, without having to re-do them.
    */
-  public ResourceSet estimateResourceConsumptionLocal(OS os, int inputs) {
-    switch (os) {
-      case DARWIN:
-        return ResourceSet.createWithRamCpu(/* memoryMb= */ 15 + 0.05 * inputs, /* cpuUsage= */ 1);
-      case LINUX:
-        return ResourceSet.createWithRamCpu(
-            /* memoryMb= */ Math.max(50, -100 + 0.1 * inputs), /* cpuUsage= */ 1);
-      default:
-        return ResourceSet.createWithRamCpu(/* memoryMb= */ 1500 + inputs, /* cpuUsage= */ 1);
-    }
-  }
-
-  private final class CppLinkActionContinuation extends ActionContinuationOrResult {
+  @VisibleForTesting
+  static class LocalResourcesEstimator implements LocalResourcesSupplier {
     private final ActionExecutionContext actionExecutionContext;
-    private final SpawnContinuation spawnContinuation;
+    private final OS os;
+    private final NestedSet<Artifact> inputs;
 
-    public CppLinkActionContinuation(
-        ActionExecutionContext actionExecutionContext, SpawnContinuation spawnContinuation) {
-      this.actionExecutionContext = actionExecutionContext;
-      this.spawnContinuation = spawnContinuation;
-    }
+    /** Container for all lazily-initialized details. */
+    private static class LazyData {
+      private final int inputsCount;
+      private final long inputsBytes;
+      private final ResourceSet resourceSet;
 
-    @Override
-    public ListenableFuture<?> getFuture() {
-      return spawnContinuation.getFuture();
-    }
-
-    @Override
-    public ActionContinuationOrResult execute()
-        throws ActionExecutionException, InterruptedException {
-      try {
-        SpawnContinuation nextContinuation = spawnContinuation.execute();
-        if (!nextContinuation.isDone()) {
-          return new CppLinkActionContinuation(actionExecutionContext, nextContinuation);
-        }
-        return ActionContinuationOrResult.of(ActionResult.create(nextContinuation.get()));
-      } catch (ExecException e) {
-        throw ActionExecutionException.fromExecException(e, CppLinkAction.this);
+      LazyData(int inputsCount, long inputsBytes, ResourceSet resourceSet) {
+        this.inputsCount = inputsCount;
+        this.inputsBytes = inputsBytes;
+        this.resourceSet = resourceSet;
       }
+    }
+
+    private LazyData lazyData = null;
+
+    public LocalResourcesEstimator(
+        ActionExecutionContext actionExecutionContext, OS os, NestedSet<Artifact> inputs) {
+      this.actionExecutionContext = actionExecutionContext;
+      this.os = os;
+      this.inputs = inputs;
+    }
+
+    /** Performs costly computations required to predict linker resources consumption. */
+    private LazyData doCostlyEstimation() {
+      int inputsCount = 0;
+      long inputsBytes = 0;
+      for (Artifact input : inputs.toList()) {
+        inputsCount += 1;
+        try {
+          FileArtifactValue value =
+              actionExecutionContext.getInputMetadataProvider().getInputMetadata(input);
+          if (value != null) {
+            inputsBytes += value.getSize();
+          } else {
+            throw new IOException("no metadata");
+          }
+        } catch (IOException e) {
+          // TODO(https://github.com/bazelbuild/bazel/issues/17368): Propagate as ExecException when
+          // input sizes are used in the model.
+          logger.atWarning().log(
+              "Linker metrics: failed to get size of %s: %s (ignored)", input.getExecPath(), e);
+        }
+      }
+
+      // TODO(https://github.com/bazelbuild/bazel/issues/17368): Use inputBytes in the computations.
+      ResourceSet resourceSet;
+      switch (os) {
+        case DARWIN:
+          resourceSet =
+              ResourceSet.createWithRamCpu(/* memoryMb= */ 15 + 0.05 * inputsCount, /* cpu= */ 1);
+          break;
+        case LINUX:
+          resourceSet =
+              ResourceSet.createWithRamCpu(
+                  /* memoryMb= */ Math.max(50, -100 + 0.1 * inputsCount), /* cpu= */ 1);
+          break;
+        default:
+          resourceSet =
+              ResourceSet.createWithRamCpu(/* memoryMb= */ 1500 + inputsCount, /* cpu= */ 1);
+          break;
+      }
+
+      return new LazyData(inputsCount, inputsBytes, resourceSet);
+    }
+
+    @Override
+    public ResourceSet get() throws ExecException {
+      if (lazyData == null) {
+        lazyData = doCostlyEstimation();
+      }
+      return lazyData.resourceSet;
+    }
+
+    /**
+     * Emits a log entry with the linker resource prediction statistics.
+     *
+     * <p>This should only be called for spawns where we have actual linker consumption metrics so
+     * that we can compare those to the prediction. In practice, this means that this can only be
+     * called for locally-executed linkers.
+     *
+     * @param actualMemoryKb memory consumed by the linker in KB
+     */
+    public void logMetrics(long actualMemoryKb) {
+      if (lazyData == null) {
+        // We should never have to do this here because, today, the memory consumption numbers in
+        // actualMemoryKb are only available for locally-executed linkers, which means that get()
+        // has been called beforehand. But this does not necessarily have to be the case: we can
+        // imagine a remote spawn runner that does return consumed resources, at which point we
+        // would get here but get() would not have been called.
+        lazyData = doCostlyEstimation();
+      }
+
+      logger.atFine().log(
+          "Linker metrics: inputs_count=%d,inputs_mb=%.2f,estimated_mb=%.2f,consumed_mb=%.2f",
+          lazyData.inputsCount,
+          ((double) lazyData.inputsBytes) / 1024 / 1024,
+          lazyData.resourceSet.getMemoryMb(),
+          ((double) actualMemoryKb) / 1024);
     }
   }
 

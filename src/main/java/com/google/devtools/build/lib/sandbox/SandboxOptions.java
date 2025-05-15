@@ -18,8 +18,8 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.devtools.build.lib.actions.LocalHostCapacity;
 import com.google.devtools.build.lib.util.OptionsUtils;
+import com.google.devtools.build.lib.util.RamResourceConverter;
 import com.google.devtools.build.lib.util.ResourceConverter;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
@@ -84,8 +84,8 @@ public class SandboxOptions extends OptionsBase {
   @Option(
       name = "ignore_unsupported_sandboxing",
       defaultValue = "false",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.UNKNOWN},
+      documentationCategory = OptionDocumentationCategory.LOGGING,
+      effectTags = {OptionEffectTag.TERMINAL_OUTPUT},
       help = "Do not print a warning when sandboxed execution is not supported on this system.")
   public boolean ignoreUnsupportedSandboxing;
 
@@ -96,10 +96,9 @@ public class SandboxOptions extends OptionsBase {
       effectTags = {OptionEffectTag.TERMINAL_OUTPUT},
       help =
           "Enables debugging features for the sandboxing feature. This includes two things: first, "
-              + "the sandbox root contents are left untouched after a build (and if sandboxfs is "
-              + "in use, the file system is left mounted); and second, prints extra debugging "
-              + "information on execution. This can help developers of Bazel or Starlark rules "
-              + "with debugging failures due to missing input files, etc.")
+              + "the sandbox root contents are left untouched after a build; and second, prints "
+              + "extra debugging information on execution. This can help developers of Bazel or "
+              + "Starlark rules with debugging failures due to missing input files, etc.")
   public boolean sandboxDebug;
 
   @Option(
@@ -130,6 +129,18 @@ public class SandboxOptions extends OptionsBase {
       effectTags = {OptionEffectTag.EXECUTION},
       help = "Change the current username to 'nobody' for sandboxed actions.")
   public boolean sandboxFakeUsername;
+
+  @Option(
+      name = "sandbox_explicit_pseudoterminal",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.EXECUTION},
+      help =
+          "Explicitly enable the creation of pseudoterminals for sandboxed actions."
+              + " Some linux distributions require setting the group id of the process to 'tty'"
+              + " inside the sandbox in order for pseudoterminals to function. If this is"
+              + " causing issues, this flag can be disabled to enable other groups to be used.")
+  public boolean sandboxExplicitPseudoterminal;
 
   @Option(
       name = "sandbox_block_path",
@@ -174,37 +185,11 @@ public class SandboxOptions extends OptionsBase {
   public List<ImmutableMap.Entry<String, String>> sandboxAdditionalMounts;
 
   @Option(
-      name = "experimental_use_sandboxfs",
-      converter = TriStateConverter.class,
-      defaultValue = "false",
-      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
-      effectTags = {OptionEffectTag.HOST_MACHINE_RESOURCE_OPTIMIZATIONS, OptionEffectTag.EXECUTION},
-      help =
-          "Use sandboxfs to create the actions' execroot directories instead of building a symlink "
-              + "tree. If \"yes\", the binary provided by --experimental_sandboxfs_path must be "
-              + "valid and correspond to a supported version of sandboxfs. If \"auto\", the binary "
-              + "may be missing or not compatible.")
-  public TriState useSandboxfs;
-
-  @Option(
-      name = "experimental_sandboxfs_path",
-      defaultValue = "sandboxfs",
-      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
-      effectTags = {OptionEffectTag.HOST_MACHINE_RESOURCE_OPTIMIZATIONS, OptionEffectTag.EXECUTION},
-      help =
-          "Path to the sandboxfs binary to use when --experimental_use_sandboxfs is true. If a "
-              + "bare name, use the first binary of that name found in the PATH.")
-  public String sandboxfsPath;
-
-  @Option(
       name = "experimental_sandboxfs_map_symlink_targets",
       defaultValue = "false",
       documentationCategory = OptionDocumentationCategory.INPUT_STRICTNESS,
       effectTags = {OptionEffectTag.HOST_MACHINE_RESOURCE_OPTIMIZATIONS, OptionEffectTag.EXECUTION},
-      help =
-          "If true, maps the targets of symbolic links specified as action inputs into the "
-              + "sandbox. This feature exists purely to workaround buggy rules that do not do "
-              + "this on their own and should be removed once all such rules are fixed.")
+      help = "No-op")
   public boolean sandboxfsMapSymlinkTargets;
 
   @Option(
@@ -212,7 +197,7 @@ public class SandboxOptions extends OptionsBase {
       converter = TriStateConverter.class,
       defaultValue = "false",
       documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
-      effectTags = {OptionEffectTag.UNKNOWN},
+      effectTags = {OptionEffectTag.EXECUTION},
       help =
           "Use Windows sandbox to run actions. "
               + "If \"yes\", the binary provided by --experimental_windows_sandbox_path must be "
@@ -224,7 +209,7 @@ public class SandboxOptions extends OptionsBase {
       name = "experimental_windows_sandbox_path",
       defaultValue = "BazelSandbox.exe",
       documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
-      effectTags = {OptionEffectTag.UNKNOWN},
+      effectTags = {OptionEffectTag.EXECUTION},
       help =
           "Path to the Windows sandbox binary to use when --experimental_use_windows_sandbox is"
               + " true. If a bare name, use the first binary of that name found in the PATH.")
@@ -244,16 +229,6 @@ public class SandboxOptions extends OptionsBase {
     }
     return ImmutableSet.copyOf(inaccessiblePaths);
   }
-
-  @Option(
-      name = "experimental_collect_local_sandbox_action_metrics",
-      defaultValue = "true",
-      documentationCategory = OptionDocumentationCategory.LOGGING,
-      effectTags = {OptionEffectTag.EXECUTION},
-      help =
-          "When enabled, execution statistics (such as user and system time) are recorded for "
-              + "locally executed actions which use sandboxing")
-  public boolean collectLocalSandboxExecutionStatistics;
 
   @Option(
       name = "experimental_enable_docker_sandbox",
@@ -315,7 +290,7 @@ public class SandboxOptions extends OptionsBase {
       oldName = "experimental_sandbox_default_allow_network",
       defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.INPUT_STRICTNESS,
-      effectTags = {OptionEffectTag.UNKNOWN},
+      effectTags = {OptionEffectTag.EXECUTION},
       help =
           "Allow network access by default for actions; this may not work with all sandboxing "
               + "implementations.")
@@ -323,7 +298,7 @@ public class SandboxOptions extends OptionsBase {
 
   @Option(
       name = "experimental_sandbox_async_tree_delete_idle_threads",
-      defaultValue = "0",
+      defaultValue = "4",
       converter = AsyncTreeDeletesConverter.class,
       documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
       effectTags = {OptionEffectTag.HOST_MACHINE_RESOURCE_OPTIMIZATIONS, OptionEffectTag.EXECUTION},
@@ -336,7 +311,7 @@ public class SandboxOptions extends OptionsBase {
 
   @Option(
       name = "incompatible_legacy_local_fallback",
-      defaultValue = "true",
+      defaultValue = "false",
       documentationCategory = OptionDocumentationCategory.INPUT_STRICTNESS,
       effectTags = {OptionEffectTag.EXECUTION},
       metadataTags = {OptionMetadataTag.INCOMPATIBLE_CHANGE},
@@ -348,14 +323,28 @@ public class SandboxOptions extends OptionsBase {
   public boolean legacyLocalFallback;
 
   @Option(
-      name = "experimental_reuse_sandbox_directories",
-      defaultValue = "false",
+      name = "reuse_sandbox_directories",
+      oldName = "experimental_reuse_sandbox_directories",
+      oldNameWarning = false,
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
       effectTags = {OptionEffectTag.HOST_MACHINE_RESOURCE_OPTIMIZATIONS, OptionEffectTag.EXECUTION},
       help =
           "If set to true, directories used by sandboxed non-worker execution may be reused to"
               + " avoid unnecessary setup costs.")
   public boolean reuseSandboxDirectories;
+
+  @Option(
+      name = "experimental_inmemory_sandbox_stashes",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.HOST_MACHINE_RESOURCE_OPTIMIZATIONS, OptionEffectTag.EXECUTION},
+      help =
+          "If set to true, the contents of stashed sandboxes for reuse_sandbox_directories will be"
+              + " tracked in memory. This reduces the amount of I/O needed during reuse. Depending"
+              + " on the build this flag may improve wall time. Depending on the build as well this"
+              + " flag may use a significant amount of additional memory.")
+  public boolean experimentalInMemorySandboxStashes;
 
   @Option(
       name = "experimental_use_hermetic_linux_sandbox",
@@ -370,13 +359,32 @@ public class SandboxOptions extends OptionsBase {
               + "then the input files will be copied instead.")
   public boolean useHermetic;
 
+  @Option(
+      name = "incompatible_sandbox_hermetic_tmp",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.EXECUTION},
+      help =
+          "If set to true, each Linux sandbox will have its own dedicated empty directory mounted"
+              + " as /tmp rather than sharing /tmp with the host filesystem. Use"
+              + " --sandbox_add_mount_pair=/tmp to keep seeing the host's /tmp in all sandboxes.")
+  public boolean sandboxHermeticTmp;
+
+  @Option(
+      name = "experimental_sandbox_memory_limit_mb",
+      defaultValue = "0",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.EXECUTION},
+      converter = RamResourceConverter.class,
+      help =
+          "If > 0, each Linux sandbox will be limited to the given amount of memory (in MB)."
+              + " Requires cgroups v1 or v2 and permissions for the users to the cgroups dir.")
+  public int memoryLimitMb;
+
   /** Converter for the number of threads used for asynchronous tree deletion. */
-  public static final class AsyncTreeDeletesConverter extends ResourceConverter {
+  public static final class AsyncTreeDeletesConverter extends ResourceConverter.IntegerConverter {
     public AsyncTreeDeletesConverter() {
-      super(
-          () -> (int) Math.ceil(LocalHostCapacity.getLocalHostCapacity().getCpuUsage()),
-          0,
-          Integer.MAX_VALUE);
+      super(/* auto= */ HOST_CPUS_SUPPLIER, /* minValue= */ 0, /* maxValue= */ Integer.MAX_VALUE);
     }
   }
 }

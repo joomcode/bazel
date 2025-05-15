@@ -15,13 +15,16 @@ package com.google.devtools.build.lib.remote.merkletree;
 
 import build.bazel.remote.execution.v2.Digest;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.Artifact.DerivedArtifact;
 import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
+import com.google.devtools.build.lib.actions.ArtifactPathResolver;
 import com.google.devtools.build.lib.actions.FileArtifactValue;
-import com.google.devtools.build.lib.actions.MetadataProvider;
+import com.google.devtools.build.lib.actions.InputMetadataProvider;
 import com.google.devtools.build.lib.actions.cache.VirtualActionInput;
+import com.google.devtools.build.lib.remote.Scrubber.SpawnScrubber;
 import com.google.devtools.build.lib.remote.merkletree.DirectoryTree.DirectoryNode;
 import com.google.devtools.build.lib.remote.merkletree.DirectoryTree.FileNode;
 import com.google.devtools.build.lib.remote.merkletree.DirectoryTree.SymlinkNode;
@@ -34,8 +37,10 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import javax.annotation.Nullable;
 
 /** Builder for directory trees. */
 class DirectoryTreeBuilder {
@@ -57,12 +62,42 @@ class DirectoryTreeBuilder {
 
   static DirectoryTree fromActionInputs(
       SortedMap<PathFragment, ActionInput> inputs,
-      MetadataProvider metadataProvider,
+      InputMetadataProvider inputMetadataProvider,
       Path execRoot,
+      ArtifactPathResolver artifactPathResolver,
+      @Nullable SpawnScrubber spawnScrubber,
+      DigestUtil digestUtil)
+      throws IOException {
+    return fromActionInputs(
+        inputs,
+        ImmutableSet.of(),
+        inputMetadataProvider,
+        execRoot,
+        artifactPathResolver,
+        spawnScrubber,
+        digestUtil);
+  }
+
+  static DirectoryTree fromActionInputs(
+      SortedMap<PathFragment, ActionInput> inputs,
+      Set<PathFragment> toolInputs,
+      InputMetadataProvider inputMetadataProvider,
+      Path execRoot,
+      ArtifactPathResolver artifactPathResolver,
+      @Nullable SpawnScrubber spawnScrubber,
       DigestUtil digestUtil)
       throws IOException {
     Map<PathFragment, DirectoryNode> tree = new HashMap<>();
-    int numFiles = buildFromActionInputs(inputs, metadataProvider, execRoot, digestUtil, tree);
+    int numFiles =
+        buildFromActionInputs(
+            inputs,
+            toolInputs,
+            inputMetadataProvider,
+            execRoot,
+            artifactPathResolver,
+            spawnScrubber,
+            digestUtil,
+            tree);
     return new DirectoryTree(tree, numFiles);
   }
 
@@ -85,6 +120,9 @@ class DirectoryTreeBuilder {
   /**
    * Adds the files in {@code inputs} as nodes to {@code tree}.
    *
+   * <p>Prefer {@link #buildFromActionInputs} if this Merkle tree is for an action spawn (as opposed
+   * to repository fetching).
+   *
    * <p>This method mutates {@code tree}.
    *
    * @param inputs map of paths to files. The key determines the path at which the file should be
@@ -99,6 +137,7 @@ class DirectoryTreeBuilder {
     return build(
         inputs,
         tree,
+        /* scrubber= */ null,
         (input, path, currDir) -> {
           if (!input.isFile(Symlinks.NOFOLLOW)) {
             throw new IOException(String.format("Input '%s' is not a file.", input));
@@ -119,14 +158,18 @@ class DirectoryTreeBuilder {
    */
   private static int buildFromActionInputs(
       SortedMap<PathFragment, ActionInput> inputs,
-      MetadataProvider metadataProvider,
+      Set<PathFragment> toolInputs,
+      InputMetadataProvider inputMetadataProvider,
       Path execRoot,
+      ArtifactPathResolver artifactPathResolver,
+      @Nullable SpawnScrubber spawnScrubber,
       DigestUtil digestUtil,
       Map<PathFragment, DirectoryNode> tree)
       throws IOException {
     return build(
         inputs,
         tree,
+        spawnScrubber,
         (input, path, currDir) -> {
           if (input instanceof VirtualActionInput) {
             VirtualActionInput virtualActionInput = (VirtualActionInput) input;
@@ -134,22 +177,27 @@ class DirectoryTreeBuilder {
             boolean childAdded =
                 currDir.addChild(
                     FileNode.createExecutable(
-                        path.getBaseName(), virtualActionInput.getBytes(), d));
+                        path.getBaseName(),
+                        virtualActionInput.getBytes(),
+                        d,
+                        toolInputs.contains(path)));
             return childAdded ? 1 : 0;
           }
 
           FileArtifactValue metadata =
               Preconditions.checkNotNull(
-                  metadataProvider.getMetadata(input),
+                  inputMetadataProvider.getInputMetadata(input),
                   "missing metadata for '%s'",
                   input.getExecPathString());
           switch (metadata.getType()) {
             case REGULAR_FILE:
               {
                 Digest d = DigestUtil.buildDigest(metadata.getDigest(), metadata.getSize());
-                Path inputPath = ActionInputHelper.toInputPath(input, execRoot);
+                Path inputPath = artifactPathResolver.toPath(input);
                 boolean childAdded =
-                    currDir.addChild(FileNode.createExecutable(path.getBaseName(), inputPath, d));
+                    currDir.addChild(
+                        FileNode.createExecutable(
+                            path.getBaseName(), inputPath, d, toolInputs.contains(path)));
                 return childAdded ? 1 : 0;
               }
 
@@ -157,7 +205,14 @@ class DirectoryTreeBuilder {
               SortedMap<PathFragment, ActionInput> directoryInputs =
                   explodeDirectory(input.getExecPath(), execRoot);
               return buildFromActionInputs(
-                  directoryInputs, metadataProvider, execRoot, digestUtil, tree);
+                  directoryInputs,
+                  toolInputs,
+                  inputMetadataProvider,
+                  execRoot,
+                  artifactPathResolver,
+                  spawnScrubber,
+                  digestUtil,
+                  tree);
 
             case SYMLINK:
               {
@@ -166,7 +221,7 @@ class DirectoryTreeBuilder {
                     "Encountered symlink input '%s', but all source symlinks should have been"
                         + " resolved by SkyFrame. This is a bug.",
                     path);
-                Path inputPath = ActionInputHelper.toInputPath(input, execRoot);
+                Path inputPath = artifactPathResolver.toPath(input);
                 boolean childAdded =
                     currDir.addChild(
                         new SymlinkNode(
@@ -192,6 +247,7 @@ class DirectoryTreeBuilder {
   private static <T> int build(
       SortedMap<PathFragment, T> inputs,
       Map<PathFragment, DirectoryNode> tree,
+      @Nullable SpawnScrubber scrubber,
       FileNodeVisitor<T> fileNodeVisitor)
       throws IOException {
     if (inputs.isEmpty()) {
@@ -205,6 +261,10 @@ class DirectoryTreeBuilder {
       // Path relative to the exec root
       PathFragment path = e.getKey();
       T input = e.getValue();
+
+      if (scrubber != null && scrubber.shouldOmitInput(path)) {
+        continue;
+      }
 
       if (input instanceof DerivedArtifact && ((DerivedArtifact) input).isTreeArtifact()) {
         // SpawnInputExpander has already expanded non-empty tree artifacts into a collection of

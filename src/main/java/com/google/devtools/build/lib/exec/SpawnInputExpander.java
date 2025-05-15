@@ -13,15 +13,19 @@
 // limitations under the License.
 package com.google.devtools.build.lib.exec;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.Artifact.ArchivedTreeArtifact;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
 import com.google.devtools.build.lib.actions.Artifact.MissingExpansionException;
+import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
 import com.google.devtools.build.lib.actions.Artifact.TreeFileArtifact;
 import com.google.devtools.build.lib.actions.FileArtifactValue;
 import com.google.devtools.build.lib.actions.FilesetManifest;
@@ -29,7 +33,8 @@ import com.google.devtools.build.lib.actions.FilesetManifest.ForbiddenRelativeSy
 import com.google.devtools.build.lib.actions.FilesetManifest.RelativeSymlinkBehavior;
 import com.google.devtools.build.lib.actions.FilesetOutputSymlink;
 import com.google.devtools.build.lib.actions.ForbiddenActionInputException;
-import com.google.devtools.build.lib.actions.MetadataProvider;
+import com.google.devtools.build.lib.actions.InputMetadataProvider;
+import com.google.devtools.build.lib.actions.PathMapper;
 import com.google.devtools.build.lib.actions.RunfilesSupplier;
 import com.google.devtools.build.lib.actions.Spawn;
 import com.google.devtools.build.lib.actions.cache.VirtualActionInput;
@@ -39,7 +44,6 @@ import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -55,6 +59,7 @@ public class SpawnInputExpander {
   private final Path execRoot;
   private final boolean strict;
   private final RelativeSymlinkBehavior relSymlinkBehavior;
+  private final boolean expandArchivedTreeArtifacts;
 
   /**
    * Creates a new instance. If strict is true, then the expander checks for directories in runfiles
@@ -92,9 +97,18 @@ public class SpawnInputExpander {
    */
   public SpawnInputExpander(
       Path execRoot, boolean strict, RelativeSymlinkBehavior relSymlinkBehavior) {
+    this(execRoot, strict, relSymlinkBehavior, true);
+  }
+
+  public SpawnInputExpander(
+      Path execRoot,
+      boolean strict,
+      RelativeSymlinkBehavior relSymlinkBehavior,
+      boolean expandArchivedTreeArtifacts) {
     this.execRoot = execRoot;
     this.strict = strict;
     this.relSymlinkBehavior = relSymlinkBehavior;
+    this.expandArchivedTreeArtifacts = expandArchivedTreeArtifacts;
   }
 
   private static void addMapping(
@@ -108,37 +122,66 @@ public class SpawnInputExpander {
 
   /** Adds runfiles inputs from runfilesSupplier to inputMappings. */
   @VisibleForTesting
-  void addRunfilesToInputs(
+  public void addRunfilesToInputs(
       Map<PathFragment, ActionInput> inputMap,
       RunfilesSupplier runfilesSupplier,
-      MetadataProvider actionFileCache,
+      InputMetadataProvider inputMetadataProvider,
       ArtifactExpander artifactExpander,
+      PathMapper pathMapper,
       PathFragment baseDirectory)
       throws IOException, ForbiddenActionInputException {
     Map<PathFragment, Map<PathFragment, Artifact>> rootsAndMappings =
         runfilesSupplier.getMappings();
-
     for (Map.Entry<PathFragment, Map<PathFragment, Artifact>> rootAndMappings :
         rootsAndMappings.entrySet()) {
-      PathFragment root = rootAndMappings.getKey();
-      Preconditions.checkState(!root.isAbsolute(), root);
-      for (Map.Entry<PathFragment, Artifact> mapping : rootAndMappings.getValue().entrySet()) {
+      addSingleRunfilesTreeToInputs(
+          inputMap,
+          rootAndMappings.getKey(),
+          rootAndMappings.getValue(),
+          inputMetadataProvider,
+          artifactExpander,
+          pathMapper,
+          baseDirectory);
+    }
+  }
+
+  private void addSingleRunfilesTreeToInputs(
+      Map<PathFragment, ActionInput> inputMap,
+      PathFragment root,
+      Map<PathFragment, Artifact> mappings,
+      InputMetadataProvider inputMetadataProvider,
+      ArtifactExpander artifactExpander,
+      PathMapper pathMapper,
+      PathFragment baseDirectory)
+      throws IOException, ForbiddenActionInputException {
+    Preconditions.checkState(!root.isAbsolute(), root);
+    for (Map.Entry<PathFragment, Artifact> mapping : mappings.entrySet()) {
         PathFragment location = root.getRelative(mapping.getKey());
         Artifact localArtifact = mapping.getValue();
         if (localArtifact != null) {
           Preconditions.checkState(!localArtifact.isMiddlemanArtifact());
           if (localArtifact.isTreeArtifact()) {
-            List<ActionInput> expandedInputs =
-                ActionInputHelper.expandArtifacts(
-                    NestedSetBuilder.create(Order.STABLE_ORDER, localArtifact),
-                    artifactExpander,
-                    /* keepEmptyTreeArtifacts= */ false);
+            ArchivedTreeArtifact archivedTreeArtifact =
+                expandArchivedTreeArtifacts
+                    ? null
+                    : artifactExpander.getArchivedTreeArtifact((SpecialArtifact) localArtifact);
+            if (archivedTreeArtifact != null) {
+              // TODO(bazel-team): Add path mapping support for archived tree artifacts.
+              addMapping(inputMap, location, localArtifact, baseDirectory);
+            } else {
+              List<ActionInput> expandedInputs =
+                  ActionInputHelper.expandArtifacts(
+                      NestedSetBuilder.create(Order.STABLE_ORDER, localArtifact),
+                      artifactExpander,
+                      /* keepEmptyTreeArtifacts= */ false);
             for (ActionInput input : expandedInputs) {
-              addMapping(
-                  inputMap,
-                  location.getRelative(((TreeFileArtifact) input).getParentRelativePath()),
-                  input,
-                  baseDirectory);
+                addMapping(
+                    inputMap,
+                    mapForRunfiles(pathMapper, root, location)
+                        .getRelative(((TreeFileArtifact) input).getParentRelativePath()),
+                    input,
+                    baseDirectory);
+              }
             }
           } else if (localArtifact.isFileset()) {
             ImmutableList<FilesetOutputSymlink> filesetLinks;
@@ -147,16 +190,21 @@ public class SpawnInputExpander {
             } catch (MissingExpansionException e) {
               throw new IllegalStateException(e);
             }
+            // TODO(bazel-team): Add path mapping support for filesets.
             addFilesetManifest(location, localArtifact, filesetLinks, inputMap, baseDirectory);
           } else {
             if (strict) {
-              failIfDirectory(actionFileCache, localArtifact);
+            failIfDirectory(inputMetadataProvider, localArtifact);
             }
-            addMapping(inputMap, location, localArtifact, baseDirectory);
+            addMapping(
+                inputMap, mapForRunfiles(pathMapper, root, location), localArtifact, baseDirectory);
           }
         } else {
-          addMapping(inputMap, location, VirtualActionInput.EMPTY_MARKER, baseDirectory);
-        }
+        addMapping(
+            inputMap,
+            mapForRunfiles(pathMapper, root, location),
+            VirtualActionInput.EMPTY_MARKER,
+            baseDirectory);
       }
     }
   }
@@ -164,19 +212,20 @@ public class SpawnInputExpander {
   /** Adds runfiles inputs from runfilesSupplier to inputMappings. */
   public Map<PathFragment, ActionInput> addRunfilesToInputs(
       RunfilesSupplier runfilesSupplier,
-      MetadataProvider actionFileCache,
+      InputMetadataProvider actionFileCache,
       ArtifactExpander artifactExpander,
+      PathMapper pathMapper,
       PathFragment baseDirectory)
       throws IOException, ForbiddenActionInputException {
     Map<PathFragment, ActionInput> inputMap = new HashMap<>();
     addRunfilesToInputs(
-        inputMap, runfilesSupplier, actionFileCache, artifactExpander, baseDirectory);
+        inputMap, runfilesSupplier, actionFileCache, artifactExpander, pathMapper, baseDirectory);
     return inputMap;
   }
 
-  private static void failIfDirectory(MetadataProvider actionFileCache, ActionInput input)
+  private static void failIfDirectory(InputMetadataProvider actionFileCache, ActionInput input)
       throws IOException, ForbiddenActionInputException {
-    FileArtifactValue metadata = actionFileCache.getMetadata(input);
+    FileArtifactValue metadata = actionFileCache.getInputMetadata(input);
     if (metadata != null && !metadata.getType().isFile()) {
       throw new ForbiddenNonFileException(input);
     }
@@ -215,6 +264,7 @@ public class SpawnInputExpander {
           value == null
               ? VirtualActionInput.EMPTY_MARKER
               : ActionInputHelper.fromPath(execRoot.getRelative(value).asFragment());
+      // TODO(bazel-team): Add path mapping support for filesets.
       addMapping(inputMappings, mapping.getKey(), artifact, baseDirectory);
       }
   }
@@ -223,6 +273,7 @@ public class SpawnInputExpander {
       Map<PathFragment, ActionInput> inputMap,
       NestedSet<? extends ActionInput> inputFiles,
       ArtifactExpander artifactExpander,
+      PathMapper pathMapper,
       PathFragment baseDirectory) {
     // Actions that accept TreeArtifacts as inputs generally expect the directory corresponding
     // to the artifact to be created, even if it is empty. We explicitly keep empty TreeArtifacts
@@ -231,7 +282,17 @@ public class SpawnInputExpander {
         ActionInputHelper.expandArtifacts(
             inputFiles, artifactExpander, /* keepEmptyTreeArtifacts= */ true);
     for (ActionInput input : inputs) {
-      addMapping(inputMap, input.getExecPath(), input, baseDirectory);
+      if (input instanceof TreeFileArtifact) {
+        addMapping(
+            inputMap,
+            pathMapper
+                .map(((TreeFileArtifact) input).getParent().getExecPath())
+                .getRelative(((TreeFileArtifact) input).getParentRelativePath()),
+            input,
+            baseDirectory);
+      } else {
+        addMapping(inputMap, pathMapper.map(input.getExecPath()), input, baseDirectory);
+      }
     }
   }
 
@@ -250,30 +311,55 @@ public class SpawnInputExpander {
       Spawn spawn,
       ArtifactExpander artifactExpander,
       PathFragment baseDirectory,
-      MetadataProvider actionInputFileCache)
+      InputMetadataProvider actionInputFileCache)
       throws IOException, ForbiddenActionInputException {
     TreeMap<PathFragment, ActionInput> inputMap = new TreeMap<>();
-    addInputs(inputMap, spawn.getInputFiles(), artifactExpander, baseDirectory);
+    addInputs(
+        inputMap, spawn.getInputFiles(), artifactExpander, spawn.getPathMapper(), baseDirectory);
     addRunfilesToInputs(
         inputMap,
         spawn.getRunfilesSupplier(),
         actionInputFileCache,
         artifactExpander,
+        spawn.getPathMapper(),
         baseDirectory);
     addFilesetManifests(spawn.getFilesetMappings(), inputMap, baseDirectory);
     return inputMap;
   }
 
+  private static PathFragment mapForRunfiles(
+      PathMapper pathMapper, PathFragment runfilesDir, PathFragment execPath) {
+    if (pathMapper.isNoop()) {
+      return execPath;
+    }
+    String runfilesDirName = runfilesDir.getBaseName();
+    Preconditions.checkArgument(runfilesDirName.endsWith(".runfiles"));
+    // Derive the path of the executable, apply the path mapping to it and then rederive the path
+    // of the runfiles dir.
+    PathFragment executable =
+        runfilesDir.replaceName(
+            runfilesDirName.substring(0, runfilesDirName.length() - ".runfiles".length()));
+    return pathMapper
+        .map(executable)
+        .replaceName(runfilesDirName)
+        .getRelative(execPath.relativeTo(runfilesDir));
+  }
+
   /** The interface for accessing part of the input hierarchy. */
   public interface InputWalker {
+
+    /** Returns the leaf nodes at this point in the hierarchy. */
     SortedMap<PathFragment, ActionInput> getLeavesInputMapping()
         throws IOException, ForbiddenActionInputException;
 
-    void visitNonLeaves(InputVisitor visitor) throws IOException, ForbiddenActionInputException;
+    /** Invokes the visitor on the non-leaf nodes at this point in the hierarchy. */
+    default void visitNonLeaves(InputVisitor visitor)
+        throws IOException, ForbiddenActionInputException {}
   }
 
   /** The interface for visiting part of the input hierarchy. */
   public interface InputVisitor {
+
     /**
      * Visits a part of the input hierarchy.
      *
@@ -298,43 +384,26 @@ public class SpawnInputExpander {
       Spawn spawn,
       ArtifactExpander artifactExpander,
       PathFragment baseDirectory,
-      MetadataProvider actionInputFileCache,
+      InputMetadataProvider inputMetadataProvider,
       InputVisitor visitor)
       throws IOException, ForbiddenActionInputException {
-    walkNestedSetInputs(baseDirectory, spawn.getInputFiles(), artifactExpander, visitor);
+    walkNestedSetInputs(
+        baseDirectory, spawn.getInputFiles(), artifactExpander, spawn.getPathMapper(), visitor);
 
-    RunfilesSupplier runfilesSupplier = spawn.getRunfilesSupplier();
-    visitor.visit(
-        // The list of variables affecting the functional expressions below.
-        Arrays.asList(
-            // Assuming that artifactExpander and actionInputFileCache, different for each spawn,
-            // always expand the same way.
-            this, // For accessing addRunfilesToInputs.
-            runfilesSupplier,
-            baseDirectory),
-        new InputWalker() {
-          @Override
-          public SortedMap<PathFragment, ActionInput> getLeavesInputMapping()
-              throws IOException, ForbiddenActionInputException {
-            TreeMap<PathFragment, ActionInput> inputMap = new TreeMap<>();
-            addRunfilesToInputs(
-                inputMap, runfilesSupplier, actionInputFileCache, artifactExpander, baseDirectory);
-            return inputMap;
-          }
-
-          @Override
-          public void visitNonLeaves(InputVisitor childVisitor) {}
-        });
+    walkRunfilesInputs(
+        baseDirectory,
+        spawn.getRunfilesSupplier(),
+        inputMetadataProvider,
+        artifactExpander,
+        spawn.getPathMapper(),
+        visitor);
 
     Map<Artifact, ImmutableList<FilesetOutputSymlink>> filesetMappings = spawn.getFilesetMappings();
     // filesetMappings is assumed to be very small, so no need to implement visitNonLeaves() for
     // improved runtime.
     visitor.visit(
-        // The list of variables affecting the functional expressions below.
-        Arrays.asList(
-            this, // For accessing addFilesetManifests.
-            filesetMappings,
-            baseDirectory),
+        // Cache key for the sub-mapping containing the fileset inputs for this spawn.
+        ImmutableList.of(filesetMappings, baseDirectory, spawn.getPathMapper().cacheKey()),
         new InputWalker() {
           @Override
           public SortedMap<PathFragment, ActionInput> getLeavesInputMapping()
@@ -343,33 +412,72 @@ public class SpawnInputExpander {
             addFilesetManifests(filesetMappings, inputMap, baseDirectory);
             return inputMap;
           }
-
-          @Override
-          public void visitNonLeaves(InputVisitor childVisitor) {}
         });
   }
 
-  /** Walks through one level of a {@link NestedSet} of {@link ActionInput}s. */
+  /** Visits {@link Spawn#getRunfilesSupplier}. */
+  private void walkRunfilesInputs(
+      PathFragment baseDirectory,
+      RunfilesSupplier runfilesSupplier,
+      InputMetadataProvider inputMetadataProvider,
+      ArtifactExpander artifactExpander,
+      PathMapper pathMapper,
+      InputVisitor visitor)
+      throws IOException, ForbiddenActionInputException {
+    ImmutableMap<PathFragment, Map<PathFragment, Artifact>> rootsAndMappings =
+        runfilesSupplier.getMappings();
+    for (Map.Entry<PathFragment, Map<PathFragment, Artifact>> rootAndMappings :
+        rootsAndMappings.entrySet()) {
+      PathFragment root = rootAndMappings.getKey();
+      Map<PathFragment, Artifact> mappings = rootAndMappings.getValue();
+      visitor.visit(
+          // Cache key for the sub-mapping containing this runfiles tree.
+          ImmutableList.of(root, baseDirectory, pathMapper.cacheKey()),
+          new InputWalker() {
+            @Override
+            public SortedMap<PathFragment, ActionInput> getLeavesInputMapping()
+                throws IOException, ForbiddenActionInputException {
+              TreeMap<PathFragment, ActionInput> inputMap = new TreeMap<>();
+              addSingleRunfilesTreeToInputs(
+                  inputMap,
+                  root,
+                  mappings,
+                  inputMetadataProvider,
+                  artifactExpander,
+                  pathMapper,
+                  baseDirectory);
+              return inputMap;
+            }
+          });
+    }
+  }
+
+  /** Visits a {@link NestedSet} occurring in {@link Spawn#getInputFiles}. */
   private void walkNestedSetInputs(
       PathFragment baseDirectory,
       NestedSet<? extends ActionInput> someInputFiles,
       ArtifactExpander artifactExpander,
+      PathMapper pathMapper,
       InputVisitor visitor)
       throws IOException, ForbiddenActionInputException {
     visitor.visit(
-        // addInputs is static so no need to add 'this' as dependent key.
-        Arrays.asList(
-            // Assuming that artifactExpander, different for each spawn, always expands the same
-            // way.
-            someInputFiles.toNode(), baseDirectory),
+        // Cache key for the sub-mapping containing the files in this nested set.
+        ImmutableList.of(someInputFiles.toNode(), baseDirectory, pathMapper.cacheKey()),
         new InputWalker() {
           @Override
           public SortedMap<PathFragment, ActionInput> getLeavesInputMapping() {
             TreeMap<PathFragment, ActionInput> inputMap = new TreeMap<>();
+            // Consider files inside tree artifacts to be non-leaves. This caches better when a
+            // large tree is not the sole direct child of a nested set.
+            ImmutableList<? extends ActionInput> leaves =
+                someInputFiles.getLeaves().stream()
+                    .filter(a -> !isTreeArtifact(a))
+                    .collect(toImmutableList());
             addInputs(
                 inputMap,
-                NestedSetBuilder.wrap(someInputFiles.getOrder(), someInputFiles.getLeaves()),
+                NestedSetBuilder.wrap(someInputFiles.getOrder(), leaves),
                 artifactExpander,
+                pathMapper,
                 baseDirectory);
             return inputMap;
           }
@@ -377,11 +485,52 @@ public class SpawnInputExpander {
           @Override
           public void visitNonLeaves(InputVisitor childVisitor)
               throws IOException, ForbiddenActionInputException {
+            for (ActionInput input : someInputFiles.getLeaves()) {
+              if (isTreeArtifact(input)) {
+                walkTreeInputs(
+                    baseDirectory,
+                    (SpecialArtifact) input,
+                    artifactExpander,
+                    pathMapper,
+                    childVisitor);
+              }
+            }
             for (NestedSet<? extends ActionInput> subInputs : someInputFiles.getNonLeaves()) {
-              walkNestedSetInputs(baseDirectory, subInputs, artifactExpander, childVisitor);
+              walkNestedSetInputs(
+                  baseDirectory, subInputs, artifactExpander, pathMapper, childVisitor);
             }
           }
         });
+  }
+
+  /** Visits a tree artifact occurring in {@link Spawn#getInputFiles}. */
+  private void walkTreeInputs(
+      PathFragment baseDirectory,
+      SpecialArtifact tree,
+      ArtifactExpander artifactExpander,
+      PathMapper pathMapper,
+      InputVisitor visitor)
+      throws IOException, ForbiddenActionInputException {
+    visitor.visit(
+        // Cache key for the sub-mapping containing the files in this tree artifact.
+        ImmutableList.of(tree, baseDirectory, pathMapper.cacheKey()),
+        new InputWalker() {
+          @Override
+          public SortedMap<PathFragment, ActionInput> getLeavesInputMapping() {
+            TreeMap<PathFragment, ActionInput> inputMap = new TreeMap<>();
+            addInputs(
+                inputMap,
+                NestedSetBuilder.create(Order.STABLE_ORDER, tree),
+                artifactExpander,
+                pathMapper,
+                baseDirectory);
+            return inputMap;
+          }
+        });
+  }
+
+  private static boolean isTreeArtifact(ActionInput input) {
+    return input instanceof SpecialArtifact && ((SpecialArtifact) input).isTreeArtifact();
   }
 
   /**
@@ -389,6 +538,7 @@ public class SpawnInputExpander {
    * exception is currently never thrown in practice since we do not enforce "strict" mode.
    */
   private static final class ForbiddenNonFileException extends ForbiddenActionInputException {
+
     ForbiddenNonFileException(ActionInput input) {
       super("Not a file: " + input.getExecPathString());
     }
