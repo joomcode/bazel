@@ -291,57 +291,7 @@ public final class AsyncTaskCache<KeyT, ValueT> {
       Action onAlreadyRunning,
       Action onAlreadyFinished,
       boolean force) {
-    return Single.create(
-        emitter -> {
-          synchronized (lock) {
-            if (state != STATE_ACTIVE) {
-              emitter.onError(new CancellationException("already shutdown"));
-              return;
-            }
-
-            if (!force && finished.containsKey(key)) {
-              onAlreadyFinished.run();
-              emitter.onSuccess(finished.get(key));
-              return;
-            }
-
-            finished.remove(key);
-
-            Execution execution = inProgress.get(key);
-            if (execution != null) {
-              onAlreadyRunning.run();
-            } else {
-              execution = new Execution(key, task);
-              inProgress.put(key, execution);
-            }
-
-            // We must subscribe the execution within the scope of lock to avoid race condition
-            // that:
-            //    1. Two callers get the same execution instance
-            //    2. One decides to dispose the execution, since no more observers, the execution
-            // will change to the terminate state
-            //    3. Another one try to subscribe, will get "terminated" error.
-            execution.subscribe(
-                new SingleObserver<ValueT>() {
-                  @Override
-                  public void onSubscribe(@NonNull Disposable d) {
-                    emitter.setDisposable(d);
-                  }
-
-                  @Override
-                  public void onSuccess(@NonNull ValueT valueT) {
-                    emitter.onSuccess(valueT);
-                  }
-
-                  @Override
-                  public void onError(@NonNull Throwable e) {
-                    if (!emitter.isDisposed()) {
-                      emitter.onError(e);
-                    }
-                  }
-                });
-          }
-        });
+    return task
   }
 
   /**
