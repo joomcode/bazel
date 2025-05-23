@@ -23,6 +23,7 @@ import static com.google.devtools.build.lib.remote.util.RxFutures.toSingle;
 import static com.google.devtools.build.lib.remote.util.RxUtils.mergeBulkTransfer;
 import static com.google.devtools.build.lib.remote.util.RxUtils.toTransferResult;
 import static java.lang.String.format;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 import build.bazel.remote.execution.v2.Digest;
 import build.bazel.remote.execution.v2.Directory;
@@ -36,8 +37,6 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.SilentCloseable;
-import com.google.devtools.build.lib.remote.common.CacheNotFoundException;
-import com.google.devtools.build.lib.remote.common.LostInputsEvent;
 import com.google.devtools.build.lib.remote.common.RemoteActionExecutionContext;
 import com.google.devtools.build.lib.remote.common.RemoteCacheClient;
 import com.google.devtools.build.lib.remote.merkletree.MerkleTree;
@@ -157,7 +156,11 @@ public class RemoteExecutionCache extends RemoteCache {
                         }));
 
     try {
-      mergeBulkTransfer(uploads).blockingAwait();
+      //mergeBulkTransfer(uploads).blockingAwait();
+      // Workaround for https://github.com/bazelbuild/bazel/issues/19513.
+      if (!mergeBulkTransfer(uploads).blockingAwait(options.remoteTimeout.getSeconds(), SECONDS)) {
+          throw new IOException("Timed out when waiting for uploads");
+      }
     } catch (RuntimeException e) {
       Throwable cause = e.getCause();
       if (cause != null) {
@@ -186,18 +189,18 @@ public class RemoteExecutionCache extends RemoteCache {
       }
 
       var path = checkNotNull(file.getPath());
-      try {
-        if (remotePathChecker.isRemote(context, path)) {
-          // If we get here, the remote input was determined to exist in the remote or disk cache at
-          // some point before action execution, but reported to be missing when querying the remote
-          // for missing action inputs; possibly because it was evicted in the interim.
-          reporter.post(new LostInputsEvent(digest));
-          throw new CacheNotFoundException(digest, path.getPathString());
-        }
-      } catch (IOException e) {
-        return immediateFailedFuture(e);
-      }
-      return cacheProtocol.uploadFile(context, digest, path);
+//      try {
+//        if (remotePathChecker.isRemote(context, path)) {
+//          // If we get here, the remote input was determined to exist in the remote or disk cache at
+//          // some point before action execution, but reported to be missing when querying the remote
+//          // for missing action inputs; possibly because it was evicted in the interim.
+//          reporter.post(new LostInputsEvent(digest));
+//          throw new CacheNotFoundException(digest, path.getPathString());
+//        }
+//      } catch (IOException e) {
+//        return immediateFailedFuture(e);
+//      }
+      return cacheProtocol.uploadFile(context, digest, file.getPath());
     }
 
     Message message = additionalInputs.get(digest);
