@@ -291,7 +291,7 @@ public final class AsyncTaskCache<KeyT, ValueT> {
       Action onAlreadyRunning,
       Action onAlreadyFinished,
       boolean force) {
-    return task
+    return task;
   }
 
   /**
